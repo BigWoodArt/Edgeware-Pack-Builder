@@ -106,17 +106,45 @@ Each mood gets a collapsed card - click its name to expand. Inside:
   content just adds on top of what's already showing; check specific
   earlier moods to turn them off.
 - **Advanced Settings** (collapsed by default) - popup speed, image/
-  video/web/prompt chance, audio/video volume and concurrency, spiral
-  chance/strength, denial chance, moving-popup chance/speed, and a
-  per-mood cycle-length override (in seconds, or popup count - whichever
-  matches the cycle mode picked on Page 2). Leaving a field blank means
-  "keep whatever the previous mood had" - it does not reset to a
-  default. This is also where Presets and the Page 2 Apply buttons
-  (spiral/denial/cycle length) write their values, so after using any of
-  those you'll see real numbers already filled in here, ready to
-  hand-tune.
+  video/web/prompt chance, audio/video volume and concurrency, hypno
+  overlay chance/strength, subliminal text chance/opacity/duration,
+  denial chance, moving-popup chance/speed, and a per-mood cycle-length
+  override (in seconds, or popup count - whichever matches the cycle
+  mode picked on Page 2). Leaving a field blank means "keep whatever the
+  previous mood had" - it does not reset to a default. This is also
+  where Presets and the Page 2 Apply buttons (spiral/denial/cycle
+  length) write their values, so after using any of those you'll see
+  real numbers already filled in here, ready to hand-tune.
+
+  **Two different "subliminal" features, easy to mix up:** Edgeware++
+  has a hypno/spiral picture overlay (config keys `subliminalsChance` /
+  `subliminalsAlpha`, labeled here as "Hypno overlay chance/strength")
+  *and*, separately, subliminal caption text - the actual "Subliminal
+  messages" you type in per mood (config keys `capPopChance` /
+  `capPopOpacity` / `capPopTimer`, labeled here as "Subliminal text
+  chance/opacity/duration"). The names are backwards from what you'd
+  guess - `subliminalsChance` is the *picture* overlay, not the text.
+  Use the "Hypno overlay" fields to ramp the spiral picture, and the
+  "Subliminal text" fields to ramp how often/how visible/how long your
+  actual subliminal message text shows up. Escalating the wrong pair is
+  a real trap: the pack will build and run fine, it'll just be ramping
+  something other than what you intended, silently.
 
 **Hover over anything** for a plain-language explanation.
+
+**One setting you have to turn on yourself:** everything in a mood's
+Advanced Settings (and anything a Preset or Page 2 Apply button writes
+into it) is delivered to Edgeware++ as per-level `config` overrides in
+`corruption.json`. Those overrides only take effect if **"Allow full
+corruption permissions" (`corruptionFullPerm`)** is turned on in
+Edgeware's own Configure window - this can't be turned on by the pack
+itself, only by whoever runs it, and it has to be done (and saved)
+before launching. Without it, moods will still add and remove on
+schedule, but every escalation - popup speed, hypno overlay, subliminal
+text, denial chance, all of it - will stay flat at whatever the base
+config already has, and the pack will look static despite being built
+correctly. A reminder about this is now also shown in the "Pack
+built!" dialog after every build.
 
 Nothing you enter is lost by clicking **Back** - the app saves the
 current page into memory before switching, and restores everything if

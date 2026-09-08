@@ -43,6 +43,7 @@ import tempfile
 import threading
 import zipfile
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import StringVar, IntVar, BooleanVar, filedialog, messagebox
@@ -278,16 +279,30 @@ ADVANCED_FIELD_GROUPS = [
          "How likely a popup plays a sound. Fill this in to fine-tune the simple Audio checkbox above. Leave empty to just use the checkbox."),
     ]),
     ("Effects", [
-        ("subliminalsChance", "Spiral chance (%) - overrides ramp-up",
-         "How often a spiral picture shows up. Fill this in to override the automatic ramp-up setting above. Leave empty to use the automatic ramp-up."),
-        ("subliminalsAlpha", "Spiral strength (%)",
-         "How easy it is to see the spiral picture through the popup. Higher means it stands out more. This is different from 'chance' - chance is how OFTEN, this is how STRONG. Leave empty to keep it the same as before."),
+        ("subliminalsChance", "Hypno overlay chance (%) - overrides ramp-up",
+         "How often the spiral/hypno picture overlay shows up on top of a popup. Fill this in to override the automatic ramp-up setting above. Leave empty to use the automatic ramp-up. NOTE: this controls the hypno OVERLAY PICTURE, not subliminal message text - see 'Subliminal text chance' below for that."),
+        ("subliminalsAlpha", "Hypno overlay strength (%)",
+         "How easy it is to see the spiral/hypno picture through the popup. Higher means it stands out more. This is different from 'chance' - chance is how OFTEN, this is how STRONG. Leave empty to keep it the same as before. NOTE: this is the overlay picture, not subliminal message text."),
+        ("capPopChance", "Subliminal text chance (%)",
+         "How often a subliminal caption (one of this mood's 'Subliminal messages') flashes on screen. Leave empty to keep it the same as before. This is separate from the hypno overlay picture above - Edgeware has two different features that both use the word 'subliminal', and this is the one for the flashed TEXT."),
+        ("capPopOpacity", "Subliminal text opacity (%)",
+         "How visible the subliminal caption text is when it flashes. Higher means easier to read. Leave empty to keep it the same as before."),
+        ("capPopTimer", "Subliminal text duration (sec)",
+         "How many seconds a subliminal caption stays on screen before disappearing. Leave empty to keep it the same as before."),
         ("denialChance", "Denial message chance (%)",
          "How often a special 'not yet!' message shows up. Leave empty to keep it the same as before."),
         ("movingChance", "Moving popup chance (%)",
          "How often a popup slides around the screen instead of staying still. Leave empty to keep it the same as before."),
         ("movingSpeed", "Moving speed",
          "How fast a popup slides around when it moves. Leave empty to keep it the same as before."),
+        ("lkScaling", "Popup opacity (%)",
+         "How see-through the popup window itself is. Lower means more transparent/faded, 100 means fully solid. Leave empty to keep it the same as before. (Edgeware's internal name for this setting is 'lkScaling' - that's not a typo, just a legacy name.)"),
+    ]),
+    ("System Notifications", [
+        ("notificationChance", "System notification chance (%)",
+         "How often this mood fires a real desktop/OS notification popup (the kind that shows up from your system tray, outside the game window). It uses a random line from this mood's 'Notifications' text box above as the message - this setting controls how OFTEN that happens, not what it says. Leave empty to keep it the same as before."),
+        ("notificationImageChance", "System notification image chance (%)",
+         "When a system notification above fires, how often it also attaches a random pack image to it. Leave empty to keep it the same as before."),
     ]),
 ]
 ALL_ADVANCED_KEYS = [key for _, fields in ADVANCED_FIELD_GROUPS for key, _, _ in fields]
@@ -416,12 +431,17 @@ def _lerp(a: int, b: int, t: float) -> int:
 
 
 def _clean_num(x):
-    """Round to 1 decimal place; collapse to a plain int when whole
-    (e.g. 4.0 -> 4), so most fields still display as clean integers and
-    only ones that actually need a fraction (like the toned-down
-    movingSpeed presets) show one."""
-    x = round(x, 1)
-    return int(x) if float(x).is_integer() else x
+    """Always collapse to a plain int. Edgeware++'s own corruption.json
+    loader (edgeware/src/pack/load.py) validates every per-level config
+    value against Any(int, str) for the WHOLE file in one schema call -
+    no float is accepted anywhere, for any key, and there's no per-level
+    isolation: a single float value on a single mood fails validation for
+    every level in the pack at once, silently emptying out corruption
+    entirely (moods stop cycling, "Valid Levels" reads empty for
+    everything). This used to round to 1 decimal place to let fields like
+    movingSpeed ramp smoothly - that's exactly what was breaking real
+    packs, so it's int-only now, no exceptions."""
+    return round(x)
 
 
 def spread_values(n: int, start, end, curve: str = "linear") -> list:
@@ -454,7 +474,7 @@ PRESETS = {
         "audioVolume": (50, 60, "linear"),
         "videoVolume": (50, 60, "linear"),
         "movingChance": (0, 5, "linear"),
-        "movingSpeed": (0.6, 0.8, "linear"),
+        "movingSpeed": (0, 1, "linear"),
         "subliminalsChance": (0, 15, "linear"),
         "subliminalsAlpha": (10, 20, "linear"),
         "denialChance": (0, 5, "linear"),
@@ -470,7 +490,7 @@ PRESETS = {
         "audioVolume": (60, 80, "linear"),
         "videoVolume": (60, 80, "linear"),
         "movingChance": (5, 20, "linear"),
-        "movingSpeed": (0.8, 1.2, "linear"),
+        "movingSpeed": (1, 2, "linear"),
         "subliminalsChance": (10, 35, "linear"),
         "subliminalsAlpha": (15, 35, "linear"),
         "denialChance": (5, 20, "linear"),
@@ -486,7 +506,7 @@ PRESETS = {
         "audioVolume": (70, 100, "linear"),
         "videoVolume": (70, 100, "linear"),
         "movingChance": (10, 45, "exp"),
-        "movingSpeed": (1.0, 1.8, "linear"),
+        "movingSpeed": (1, 3, "linear"),
         "subliminalsChance": (20, 65, "exp"),
         "subliminalsAlpha": (25, 55, "linear"),
         "denialChance": (10, 40, "exp"),
@@ -502,7 +522,7 @@ PRESETS = {
         "audioVolume": (80, 100, "linear"),
         "videoVolume": (80, 100, "linear"),
         "movingChance": (20, 90, "exp"),
-        "movingSpeed": (1.2, 2.4, "linear"),
+        "movingSpeed": (2, 4, "linear"),
         "subliminalsChance": (30, 95, "exp"),
         "subliminalsAlpha": (35, 80, "linear"),
         "denialChance": (20, 75, "exp"),
@@ -571,7 +591,7 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
 
     base_raw = {
         "corruptionMode": True,
-        "corruptionTrigger": "Timed" if plan.cycle_mode == "timer" else "Popups",
+        "corruptionTrigger": "Timed" if plan.cycle_mode == "timer" else "Popup",
         # NOTE: assumed to be seconds, based on config.pyw offering a
         # seconds-based entry mode for this same setting. Not independently
         # verified beyond that - worth confirming actual cycle timing
@@ -674,7 +694,16 @@ def write_pack_source(plan: PackPlan, output_dir: Path, status_cb=None) -> None:
 
     status("Copying media...")
     media_dir = output_dir / "media"
-    media_dir.mkdir(exist_ok=True)
+    # Wipe and recreate rather than just mkdir(exist_ok=True): if a mood was
+    # ever renamed or removed between builds, its old subfolder would
+    # otherwise linger here forever. The real compiler treats any leftover
+    # media/<name>/ folder with no matching pack.yml mood entry as an
+    # "orphan" and silently re-adds it to index.json as a phantom mood with
+    # no captions and no corruption-level assignment - same failure shape
+    # as the stale pack_build/ issue, just from the other direction.
+    if media_dir.exists():
+        shutil.rmtree(media_dir)
+    media_dir.mkdir(parents=True)
     for mood in plan.moods:
         mc = plan.mood_configs.get(mood, {})
         dst_mood_dir = media_dir / mood
@@ -922,30 +951,31 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
         added = level.get("add-moods", [])
         if not added:
             continue
-        target = added[0]
-        if target not in mood_configs:
-            warnings.append(f"Corruption level references mood '{target}' that wasn't in index.json - skipped.")
-            continue
-        mc = mood_configs[target]
         cfg = level.get("config", {}) or {}
-
-        if "audioMod" in cfg:
-            mc["audio_enabled"] = bool(cfg.get("audioMod"))
-        advanced = {k: v for k, v in cfg.items() if k in ALL_ADVANCED_KEYS}
-        if advanced:
-            mc["advanced"] = advanced
-
         wallpaper_name = level.get("wallpaper")
-        if wallpaper_name:
-            candidate = root / "wallpapers" / wallpaper_name
-            mc["wallpaper_change"] = True
-            mc["wallpaper_path"] = str(candidate) if candidate.is_file() else ""
-            if not candidate.is_file():
-                warnings.append(f"'{target}' references wallpaper '{wallpaper_name}' - file not found, you'll need to re-pick it.")
-
         remove_list = level.get("remove-moods", [])
-        if remove_list:
-            mc["remove_moods"] = [m for m in remove_list if m in mood_configs]
+
+        for target in added:
+            if target not in mood_configs:
+                warnings.append(f"Corruption level references mood '{target}' that wasn't in index.json - skipped.")
+                continue
+            mc = mood_configs[target]
+
+            if "audioMod" in cfg:
+                mc["audio_enabled"] = bool(cfg.get("audioMod"))
+            advanced = {k: v for k, v in cfg.items() if k in ALL_ADVANCED_KEYS}
+            if advanced:
+                mc["advanced"] = advanced
+
+            if wallpaper_name:
+                candidate = root / "wallpapers" / wallpaper_name
+                mc["wallpaper_change"] = True
+                mc["wallpaper_path"] = str(candidate) if candidate.is_file() else ""
+                if not candidate.is_file():
+                    warnings.append(f"'{target}' references wallpaper '{wallpaper_name}' - file not found, you'll need to re-pick it.")
+
+            if remove_list:
+                mc["remove_moods"] = [m for m in remove_list if m in mood_configs]
 
     # Try to regroup flat media files back into per-mood buckets using
     # media.json's own mood tags, if the shape is one we recognize.
@@ -1912,8 +1942,17 @@ class PackBuilderApp:
             if not raw:
                 continue
             try:
-                val = float(raw)
-                result[key] = int(val) if val.is_integer() else val
+                # Always round to int, never keep a float, whole-number or
+                # not: Edgeware++'s corruption.json loader validates every
+                # per-level config value as Any(int, str) for the WHOLE
+                # file in one schema call, with no per-key exceptions - a
+                # single fractional value on any key silently empties out
+                # corruption for the entire pack (see _clean_num above for
+                # the full explanation). This applies even to keys whose
+                # live in-game settings value CAN be fractional (like
+                # audioVolume or lkScaling/Popup Opacity) - the corruption
+                # level override schema doesn't make that distinction.
+                result[key] = round(float(raw))
             except ValueError:
                 if strict:
                     errors.append(f"'{mood_name}' -> {key}: '{raw}' isn't a number")
@@ -1999,7 +2038,7 @@ class PackBuilderApp:
         self.status_var.set("Starting...")
 
         self._build_result = {"done": False, "error": None, "zip_path": None, "no_compiler": False,
-                               "out_dir": out_dir, "warn_stdout": ""}
+                               "out_dir": out_dir, "warn_stdout": "", "log_path": None}
 
         def worker():
             try:
@@ -2010,12 +2049,49 @@ class PackBuilderApp:
                     self._build_result["done"] = True
                     return
 
+                # pack_build/ is a fixed, reused path across every rebuild of this
+                # same project - and the real Pack Tool compiler only clears its
+                # output folder when given the --test-pack flag, which we never
+                # pass. Without this, any file that isn't successfully rewritten
+                # on a given compile (e.g. a corruption.json that failed to
+                # validate on an earlier edit, or a mood/media file since removed
+                # from the pack) can survive untouched and get zipped up again
+                # alongside newer, correct files - producing a pack whose zipped
+                # contents don't actually match the current pack.yml. Wipe it
+                # before every compile so each build starts from nothing.
+                if build_dir.exists():
+                    shutil.rmtree(build_dir)
+
                 _, stdout, stderr = compile_with_pack_tool(
                     Path(self.plan.pack_tool_dir), out_dir, build_dir,
                     self.plan.compress_images, self.plan.compress_videos, self.plan.rename_media,
                     status_cb=self._set_status
                 )
                 self._build_result["warn_stdout"] = stdout or ""
+
+                # Compiler output only ever showed up transiently in the
+                # success dialog, with no way to go back and actually read it -
+                # write it to a real file next to the zip every build (not
+                # only when something looks wrong), so there's always
+                # somewhere to look.
+                log_path = project_dir / f"{safe_name}_build.log"
+                log_lines = [
+                    f"Build log for '{safe_name}' - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"Pack Tool: {self.plan.pack_tool_dir}",
+                    f"Source: {out_dir}",
+                    f"Build: {build_dir}",
+                    "",
+                    "--- stdout ---",
+                    stdout or "(empty)",
+                    "",
+                    "--- stderr ---",
+                    stderr or "(empty)",
+                ]
+                try:
+                    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+                    self._build_result["log_path"] = log_path
+                except OSError:
+                    pass  # log write failing shouldn't sink an otherwise-successful build
 
                 # The compiler only writes the raw pack files - it doesn't know
                 # about plan.json, so copy it in ourselves before zipping. This
@@ -2051,26 +2127,39 @@ class PackBuilderApp:
             messagebox.showerror("Build failed", err)
             return
 
+        perm_note = (
+            "\n\nIMPORTANT: this pack's per-mood Advanced Settings (and any Preset/ramp you applied) "
+            "only take effect in-game if 'Allow full corruption permissions' (corruptionFullPerm) is turned "
+            "ON in Edgeware's own Configure window. This isn't something the pack file can turn on for you - "
+            "it's a separate toggle you (or whoever runs the pack) have to enable yourself, every time, before "
+            "the escalation will do anything. Without it, moods will still add/remove on schedule, but the pack "
+            "will look flat/static - none of the per-level pacing/intensity changes will apply."
+        )
+
         if self._build_result.get("no_compiler"):
             messagebox.showinfo(
                 "Pack source ready",
                 f"Wrote pack.yml + arranged media/ to:\n{out_dir}\n\n"
                 f"No Pack Tool folder was set, so you'll need to compile it yourself "
                 f"(PackToolScript.bat -> option 3, pointed at that folder)."
+                f"{perm_note}"
             )
             return
 
         zip_path = self._build_result.get("zip_path")
+        log_path = self._build_result.get("log_path")
         stdout = self._build_result.get("warn_stdout", "")
         warn_note = ""
         if stdout and ("WARNING" in stdout or "ERROR" in stdout):
-            warn_note = "\n\nNote: the compiler logged some warnings - worth a skim if anything looks off in-game."
+            warn_note = f"\n\nNote: the compiler logged some warnings - check the log file for details:\n{log_path}"
+        elif log_path:
+            warn_note = f"\n\nFull compiler log saved to:\n{log_path}"
         yaml_note = "" if HAVE_YAML else "\n\n(PyYAML wasn't installed - pack.yml was written with a minimal fallback writer.)"
         messagebox.showinfo(
             "Pack built!",
             f"Finished pack:\n{zip_path}\n\n"
             f"(pack_source/ and pack_build/ inside that same folder are working files - "
-            f"safe to delete once you've confirmed the zip works.){warn_note}{yaml_note}"
+            f"safe to delete once you've confirmed the zip works.){warn_note}{yaml_note}{perm_note}"
         )
 
 
