@@ -36,6 +36,7 @@ takes.
 """
 
 import json
+import random
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,12 @@ from tkinter import StringVar, IntVar, BooleanVar, filedialog, messagebox
 from tkinter import ttk
 
 try:
+    from PIL import Image, ImageTk
+    HAVE_PIL = True
+except ImportError:
+    HAVE_PIL = False
+
+try:
     import yaml  # pyyaml
     HAVE_YAML = True
 except ImportError:
@@ -57,6 +64,7 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
+TOOL_VERSION = "0.8"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
 
 # ---------------------------------------------------------------------------
@@ -72,6 +80,8 @@ TEXT_FG = "#ffffff"
 MUTED_FG = "#d9b8c9"
 WARN_BG = "#4a2f10"
 WARN_FG = "#ffd9a0"
+TAB_ACTIVE_BG = ACCENT       # crimson - selected mood tab
+TAB_INACTIVE_BG = "#3f3f3f"  # dark gray - unselected mood tab
 
 
 def apply_theme(root: tk.Tk):
@@ -218,10 +228,8 @@ TOOLTIPS = {
     "preset_button": "Fills in Advanced Settings for every mood at once with a ready-made pacing curve, from mild to intense. You can still fine-tune individual moods afterward.",
     "cycle_popups": "Switch to the next mood after a certain number of popups have shown up, instead of waiting on a timer.",
     "popups_per_mood": "How many popups need to show up before switching to the next mood.",
-    "escalate_spirals": "Turn this on to make spiral pictures show up more and more often as moods go on.",
     "spiral_start": "How often spirals show up at the very start (0 = never, 100 = almost always).",
     "spiral_end": "How often spirals show up by the last mood.",
-    "audio_level": "How often a sound plays for any mood that has 'Audio' turned on.",
     "hypno_add": "Pick the spiral/hypno picture files you want available in this pack.",
     "hypno_clear": "Remove all the spiral/hypno pictures you picked.",
     "default_wallpaper": "Pick the background picture to use when the pack first starts, before anything changes.",
@@ -243,7 +251,6 @@ TOOLTIPS = {
     "audio_checkbox": "Turn this on to let sounds play during this mood.",
     "audio_add": "Pick one or more sound files. If you pick more than one, it'll randomly choose between them.",
     "audio_clear": "Remove all the sound files you picked for this mood.",
-    "advanced_toggle": "Click to show or hide extra, more detailed settings for this mood.",
     "advanced_note": "Leave any box below empty to just keep using whatever the last mood had - you don't have to fill in everything.",
     "remove_moods": "Check a mood here to turn its pictures off once this mood starts. Leave everything unchecked and this mood just adds its pictures on top of whatever's already showing.",
     "mood_card_toggle": "Click to show or hide this mood's settings.",
@@ -265,6 +272,12 @@ ADVANCED_FIELD_GROUPS = [
          "How many seconds THIS mood lasts before switching to the next one. Only matters if 'time delay' cycling is picked on the previous page. Leave empty to use the pack's overall cycle length."),
         ("corruptionPopups", "Cycle length override (popups)",
          "How many popups need to show up before switching away from THIS mood. Only matters if 'N popups' cycling is picked on the previous page. Leave empty to use the pack's overall cycle length."),
+        ("timeoutPopups", "Auto-close popups",
+         "Whether popups close themselves after a few seconds instead of waiting to be clicked."),
+        ("popupTimeout", "Auto-close after (sec)",
+         "How many seconds a popup waits before auto-closing. Only matters if 'Auto-close popups' above is on."),
+        ("singleMode", "One popup at a time",
+         "Whether only one popup is allowed on screen at once, instead of several stacking up."),
     ]),
     ("Audio / Video", [
         ("maxAudio", "Max sounds at once",
@@ -306,6 +319,9 @@ ADVANCED_FIELD_GROUPS = [
     ]),
 ]
 ALL_ADVANCED_KEYS = [key for _, fields in ADVANCED_FIELD_GROUPS for key, _, _ in fields]
+# Keys in ALL_ADVANCED_KEYS that are on/off rather than numeric - rendered as
+# the crimson/gray toggle switch instead of a text Entry.
+ADVANCED_BOOL_KEYS = {"timeoutPopups", "singleMode"}
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +370,46 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 
 
+class ToggleSwitch(tk.Label):
+    """A simple two-state on/off switch bound to an IntVar (1/0), styled
+    crimson-when-on / dark-gray-when-off with white text, since Advanced
+    Settings bool fields (and the pack-wide mode toggles) aren't a good fit
+    for a checkbox in this dark theme."""
+
+    def __init__(self, parent, variable: IntVar, on_text="ON", off_text="OFF",
+                 width=6, command=None, enabled: bool = True):
+        self.var = variable
+        self.on_text = on_text
+        self.off_text = off_text
+        self._command = command
+        self._enabled = enabled
+        super().__init__(parent, width=width, anchor="center", cursor="hand2",
+                          font=("Segoe UI", 9, "bold"), fg=TEXT_FG)
+        self._redraw()
+        self.bind("<Button-1>", self._on_click)
+
+    def _redraw(self):
+        on = bool(self.var.get())
+        self.config(
+            text=self.on_text if on else self.off_text,
+            bg=(TAB_ACTIVE_BG if on else TAB_INACTIVE_BG) if self._enabled else PANEL_BG,
+            fg=TEXT_FG if self._enabled else MUTED_FG,
+            cursor="hand2" if self._enabled else "arrow",
+        )
+
+    def _on_click(self, _event=None):
+        if not self._enabled:
+            return
+        self.var.set(0 if self.var.get() else 1)
+        self._redraw()
+        if self._command:
+            self._command()
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = enabled
+        self._redraw()
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -400,7 +456,19 @@ class PackPlan:
     cycle_seconds: int = 300  # how long a mood lasts before advancing (Timed mode)
     popups_per_mood: int = 5
 
-    escalate_spirals: bool = False
+    # Pack-wide settings (config.json's base "raw" section - single value for
+    # the whole pack, not per-mood). corruptionMode/mitosisMode/hibernateMode
+    # can't be corruption-escalated per-mood in Edgeware++ at all (see the
+    # per-mood Advanced Settings for everything that CAN be), so these live
+    # here instead of in mood_configs.
+    pack_corruption_mode: bool = True
+    pack_hibernate_mode: bool = False
+    pack_mitosis_mode: bool = False
+    pack_mitosis_strength: int = 2  # Edgeware's own range: 2-10
+    pack_fade_abrupt: bool = False  # False -> corruptionFadeType "Normal", True -> "Abrupt"
+    pack_buttonless: bool = False   # popups closable without a specific button
+    loaded_from_zip_dir: str = ""   # set if this session started from "Load Existing Pack (ZIP)"
+
     spiral_start_pct: int = 0
     spiral_end_pct: int = 100
 
@@ -420,6 +488,69 @@ def scan_moods(root: Path) -> list:
     if not root.is_dir():
         return []
     return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v"}
+AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
+
+
+def long_path_safe(path_str: str) -> str:
+    """Windows has a classic 260-character total-path limit that plain
+    open() (which Pillow uses under the hood) silently trips over as a
+    FileNotFoundError even when the file genuinely exists - easy to hit
+    with real, descriptively-named media files nested a few folders deep.
+    The \\\\?\\ prefix opts a single call into the Windows long-path API,
+    bypassing that limit. No-op on any other OS, and no-op if the path is
+    already prefixed or isn't absolute (the prefix requires an absolute,
+    backslash-style path to work correctly)."""
+    if sys.platform != "win32":
+        return path_str
+    if path_str.startswith("\\\\?\\"):
+        return path_str
+    p = Path(path_str)
+    if not p.is_absolute():
+        return path_str
+    return "\\\\?\\" + str(p)
+
+
+def classify_media_file(path: Path) -> str:
+    """By extension only - good enough for sorting the Media Review page
+    into Images/Videos/Audio buckets. The real Pack Tool compiler classifies
+    by actual file content when it builds the pack, so this is just a
+    display grouping, not something that affects the compiled output."""
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    return "other"
+
+
+def materialize_mood_media(plan, mood_name: str) -> list:
+    """Turn whatever's currently governing this mood's media - a folder
+    scan, an already-explicit media_files list, and/or the old separate
+    audio_paths add-on - into ONE concrete, editable file list, the first
+    time the Media Review page is opened for this mood. From then on,
+    media_files is the single source of truth: removing a file there means
+    'leave this specific file out of the pack', without needing a separate
+    excluded-files concept layered on top of a live folder scan, and without
+    ever touching anything in the actual source folder on disk."""
+    mc = plan.mood_configs.setdefault(mood_name, {})
+    if mc.get("media_files"):
+        return mc["media_files"]
+
+    files = []
+    if plan.source_dir:
+        mood_dir = Path(plan.source_dir) / mood_name
+        if mood_dir.is_dir():
+            files = [str(p) for p in sorted(mood_dir.iterdir()) if p.is_file()]
+    files.extend(mc.get("audio_paths", []))
+    mc["media_files"] = files
+    mc["audio_paths"] = []
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -461,71 +592,110 @@ def spread_values(n: int, start, end, curve: str = "linear") -> list:
 
 
 # Each preset: knob key -> (start, end, curve). Applied across however many
-# moods a pack has via _apply_spread_to_moods. corruptionTime is in seconds.
+# moods a pack has via _apply_spread_to_moods. corruptionTime/popupTimeout
+# are in seconds. Values are start-of-pack numbers from the actual config
+# menu being built for Edgeware++ itself; end-of-pack numbers are estimated
+# on an exponential curve from those (faster/shorter timing values shrink
+# toward the end of the pack, everything else escalates). Pack-wide-only
+# settings (corruptionMode, corruptionTrigger, mitosisMode, mitosisStrength,
+# hibernateMode) are NOT here - they can't be corruption-escalated per-mood
+# in Edgeware++ at all (see the pack-wide settings panel instead).
 PRESETS = {
-    "A Fun Distraction": {
-        "corruptionTime": (450, 450, "linear"),
-        "delay": (15000, 8000, "linear"),
-        "vidMod": (5, 15, "linear"),
-        "webMod": (0, 0, "linear"),
-        "promptMod": (0, 5, "linear"),
-        "maxAudio": (1, 1, "linear"),
-        "maxVideos": (1, 2, "linear"),
-        "audioVolume": (50, 60, "linear"),
-        "videoVolume": (50, 60, "linear"),
-        "movingChance": (0, 5, "linear"),
-        "movingSpeed": (0, 1, "linear"),
-        "subliminalsChance": (0, 15, "linear"),
-        "subliminalsAlpha": (10, 20, "linear"),
-        "denialChance": (0, 5, "linear"),
+    "Slight Annoyance": {
+        "delay": (5000, 2000, "exp"),
+        "popupMod": (50, 50, "linear"),
+        "vidMod": (5, 15, "exp"),
+        "audioMod": (25, 25, "linear"),
+        "webMod": (0, 5, "exp"),
+        "promptMod": (0, 5, "exp"),
+        "corruptionTime": (120, 48, "exp"),
+        "popupTimeout": (15, 6, "exp"),
+        "timeoutPopups": (1, 1, "linear"),
+        "singleMode": (1, 1, "linear"),
+        "movingChance": (0, 5, "exp"),
+        "movingSpeed": (0, 1, "exp"),
+        "denialChance": (0, 0, "linear"),
+        "capPopChance": (0, 15, "exp"),
+        "capPopOpacity": (50, 65, "exp"),
+        "capPopTimer": (3, 1, "exp"),
+        "notificationChance": (5, 10, "exp"),
+        "notificationImageChance": (20, 35, "exp"),
+        "maxAudio": (1, 2, "exp"),
+        "audioVolume": (40, 55, "exp"),
+        "maxVideos": (1, 2, "exp"),
+        "videoVolume": (40, 55, "exp"),
     },
-    "A Slight Annoyance": {
-        "corruptionTime": (300, 240, "linear"),
-        "delay": (10000, 5000, "linear"),
-        "vidMod": (10, 30, "linear"),
-        "webMod": (0, 0, "linear"),
-        "promptMod": (5, 15, "linear"),
-        "maxAudio": (1, 2, "linear"),
-        "maxVideos": (2, 4, "linear"),
-        "audioVolume": (60, 80, "linear"),
-        "videoVolume": (60, 80, "linear"),
-        "movingChance": (5, 20, "linear"),
-        "movingSpeed": (1, 2, "linear"),
-        "subliminalsChance": (10, 35, "linear"),
-        "subliminalsAlpha": (15, 35, "linear"),
-        "denialChance": (5, 20, "linear"),
+    "Bit of a Problem": {
+        "delay": (3000, 1200, "exp"),
+        "popupMod": (60, 60, "linear"),
+        "vidMod": (10, 25, "exp"),
+        "audioMod": (50, 50, "linear"),
+        "webMod": (0, 10, "exp"),
+        "promptMod": (0, 10, "exp"),
+        "corruptionTime": (90, 36, "exp"),
+        "popupTimeout": (10, 4, "exp"),
+        "timeoutPopups": (1, 1, "linear"),
+        "singleMode": (1, 1, "linear"),
+        "movingChance": (0, 10, "exp"),
+        "movingSpeed": (0, 2, "exp"),
+        "denialChance": (0, 0, "linear"),
+        "capPopChance": (10, 35, "exp"),
+        "capPopOpacity": (60, 75, "exp"),
+        "capPopTimer": (3, 1, "exp"),
+        "notificationChance": (10, 20, "exp"),
+        "notificationImageChance": (40, 55, "exp"),
+        "maxAudio": (1, 2, "exp"),
+        "audioVolume": (55, 70, "exp"),
+        "maxVideos": (2, 3, "exp"),
+        "videoVolume": (55, 70, "exp"),
     },
-    "A Real Addiction": {
-        "corruptionTime": (240, 90, "exp"),
-        "delay": (8000, 2500, "exp"),
-        "vidMod": (20, 50, "linear"),
-        "webMod": (5, 20, "linear"),
-        "promptMod": (10, 30, "linear"),
-        "maxAudio": (2, 4, "exp"),
-        "maxVideos": (3, 7, "exp"),
-        "audioVolume": (70, 100, "linear"),
-        "videoVolume": (70, 100, "linear"),
-        "movingChance": (10, 45, "exp"),
-        "movingSpeed": (1, 3, "linear"),
-        "subliminalsChance": (20, 65, "exp"),
-        "subliminalsAlpha": (25, 55, "linear"),
-        "denialChance": (10, 40, "exp"),
+    "Real Addiction": {
+        "delay": (1750, 700, "exp"),
+        "popupMod": (75, 75, "linear"),
+        "vidMod": (20, 45, "exp"),
+        "audioMod": (75, 75, "linear"),
+        "webMod": (10, 25, "exp"),
+        "promptMod": (5, 20, "exp"),
+        "corruptionTime": (60, 24, "exp"),
+        "popupTimeout": (8, 3, "exp"),
+        "timeoutPopups": (0, 0, "linear"),
+        "singleMode": (0, 0, "linear"),
+        "movingChance": (1, 20, "exp"),
+        "movingSpeed": (1, 3, "exp"),
+        "denialChance": (0, 0, "linear"),
+        "capPopChance": (30, 60, "exp"),
+        "capPopOpacity": (75, 90, "exp"),
+        "capPopTimer": (2, 1, "exp"),
+        "notificationChance": (15, 35, "exp"),
+        "notificationImageChance": (60, 75, "exp"),
+        "maxAudio": (2, 3, "exp"),
+        "audioVolume": (70, 85, "exp"),
+        "maxVideos": (3, 5, "exp"),
+        "videoVolume": (70, 85, "exp"),
     },
-    "Total Enslavement": {
-        "corruptionTime": (150, 30, "exp"),
-        "delay": (5000, 1000, "exp"),
-        "vidMod": (30, 80, "linear"),
-        "webMod": (10, 35, "linear"),
-        "promptMod": (20, 60, "linear"),
-        "maxAudio": (3, 8, "exp"),
-        "maxVideos": (5, 15, "exp"),
-        "audioVolume": (80, 100, "linear"),
-        "videoVolume": (80, 100, "linear"),
-        "movingChance": (20, 90, "exp"),
-        "movingSpeed": (2, 4, "linear"),
-        "subliminalsChance": (30, 95, "exp"),
-        "subliminalsAlpha": (35, 80, "linear"),
-        "denialChance": (20, 75, "exp"),
+    "Life-Ending Slavery": {
+        "delay": (1250, 500, "exp"),
+        "popupMod": (90, 90, "linear"),
+        "vidMod": (40, 70, "exp"),
+        "audioMod": (100, 100, "linear"),
+        "webMod": (20, 45, "exp"),
+        "promptMod": (10, 35, "exp"),
+        "corruptionTime": (30, 12, "exp"),
+        "popupTimeout": (5, 2, "exp"),
+        "timeoutPopups": (0, 0, "linear"),
+        "singleMode": (0, 0, "linear"),
+        "movingChance": (5, 40, "exp"),
+        "movingSpeed": (2, 3, "exp"),
+        "denialChance": (0, 0, "linear"),
+        "capPopChance": (60, 90, "exp"),
+        "capPopOpacity": (90, 100, "exp"),
+        "capPopTimer": (2, 1, "exp"),
+        "notificationChance": (20, 50, "exp"),
+        "notificationImageChance": (80, 95, "exp"),
+        "maxAudio": (3, 5, "exp"),
+        "audioVolume": (90, 100, "exp"),
+        "maxVideos": (4, 7, "exp"),
+        "videoVolume": (90, 100, "exp"),
     },
 }
 
@@ -558,10 +728,6 @@ def build_corruption_levels(plan: PackPlan) -> list:
 
         cfg = dict(advanced)
 
-        if "subliminalsChance" not in cfg and plan.escalate_spirals and n > 1:
-            t = i / (n - 1)
-            cfg["subliminalsChance"] = _lerp(plan.spiral_start_pct, plan.spiral_end_pct, t)
-
         if "audioMod" not in cfg:
             cfg["audioMod"] = plan.audio_mod_when_on if mc.get("audio_enabled") else 0
 
@@ -590,18 +756,22 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
         mood_entries.append(entry)
 
     base_raw = {
-        "corruptionMode": True,
+        "corruptionMode": plan.pack_corruption_mode,
         "corruptionTrigger": "Timed" if plan.cycle_mode == "timer" else "Popup",
-        # NOTE: assumed to be seconds, based on config.pyw offering a
-        # seconds-based entry mode for this same setting. Not independently
-        # verified beyond that - worth confirming actual cycle timing
-        # in-game matches what's set here.
+        # NOTE: seconds, confirmed against items.py's s_to_ms converter for
+        # corruption_time (see conversation history for verification).
         "corruptionTime": plan.cycle_seconds,
         "corruptionPopups": plan.popups_per_mood,
         "corruptionFullPerm": True,
-        "subliminalsChance": plan.spiral_start_pct if plan.escalate_spirals else 0,
+        "subliminalsChance": plan.spiral_start_pct,
         "audioMod": 0,
+        "hibernateMode": plan.pack_hibernate_mode,
+        "mitosisMode": plan.pack_mitosis_mode,
+        "corruptionFadeType": "Abrupt" if plan.pack_fade_abrupt else "Normal",
+        "buttonless": plan.pack_buttonless,
     }
+    if plan.pack_mitosis_mode:
+        base_raw["mitosisStrength"] = plan.pack_mitosis_strength
 
     return {
         "info": {
@@ -866,11 +1036,80 @@ def find_plan_json(folder: Path) -> Path:
     return None
 
 
-def load_plan_json(path: Path) -> PackPlan:
+def load_plan_json(path: Path) -> tuple:
+    """Returns (PackPlan, list_of_warnings).
+
+    media_files/wallpaper_path entries are sometimes stale or relative
+    paths rather than valid absolute ones - seen from a pack built by a
+    different tool (AutoPack Builder) that apparently records each file's
+    path from wherever IT was run from / found it at build time. That's
+    meaningless once the file is loaded into a different process/working
+    directory later. Confirmed this doesn't affect the actual compiled
+    pack Edgeware++ itself loads - only plan.json's own bookkeeping - so
+    the real file is reliably sitting right there in the compiled pack's
+    own bundled media (the same img/aud/vid layout used elsewhere in this
+    file for reconstruction), just not at the path plan.json happens to
+    record. Resolution order: the path as given (if absolute and valid) ->
+    relative to plan.json's own folder -> same filename inside this pack's
+    own bundled img/aud/vid folders, which is the strongest fallback since
+    it's the pack's own actual shipped media, not a guess about where some
+    other tool's original source files might still be. Anything that still
+    can't be found gets reported plainly right away, rather than left to
+    be discovered one broken thumbnail at a time.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     known_fields = {f for f in PackPlan.__dataclass_fields__}
     filtered = {k: v for k, v in data.items() if k in known_fields}
-    return PackPlan(**filtered)
+    plan = PackPlan(**filtered)
+
+    warnings = []
+    base = path.parent
+
+    def basename_any_sep(p_str):
+        # Path(...).name only splits on backslash when actually running on
+        # Windows - a Windows-style path string can show up in plan.json
+        # regardless of what OS loads it (packs get shared across
+        # machines), so this can't rely on the host OS's path semantics.
+        return p_str.replace("\\", "/").rsplit("/", 1)[-1]
+
+    def find_by_name(filename):
+        for subfolder in ("img", "aud", "vid"):
+            candidate = base / subfolder / filename
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def resolve(p_str, label):
+        p = Path(p_str)
+
+        if p.is_absolute() and p.is_file():
+            return p_str
+
+        if not p.is_absolute():
+            candidate = (base / p).resolve()
+            if candidate.is_file():
+                return str(candidate)
+
+        by_name = find_by_name(basename_any_sep(p_str))
+        if by_name is not None:
+            return str(by_name)
+
+        warnings.append(f"{label}: '{p_str}' couldn't be found - not at that path, not "
+                         f"relative to the pack's own folder, and no file named "
+                         f"'{basename_any_sep(p_str)}' in the pack's own bundled media "
+                         f"either. You'll need to re-add this file on the Media Review page.")
+        return p_str
+
+    for mood_name, mc in plan.mood_configs.items():
+        if isinstance(mc, dict):
+            media_files = mc.get("media_files") or []
+            if media_files:
+                mc["media_files"] = [resolve(p, f"'{mood_name}' media") for p in media_files]
+            wp = mc.get("wallpaper_path")
+            if wp:
+                mc["wallpaper_path"] = resolve(wp, f"'{mood_name}' wallpaper")
+
+    return plan, warnings
 
 
 def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
@@ -919,6 +1158,12 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
     plan.cycle_seconds = config.get("corruptionTime", plan.cycle_seconds)
     plan.popups_per_mood = config.get("corruptionPopups", plan.popups_per_mood)
     plan.audio_mod_when_on = config.get("audioMod") or plan.audio_mod_when_on
+    plan.pack_corruption_mode = bool(config.get("corruptionMode", plan.pack_corruption_mode))
+    plan.pack_hibernate_mode = bool(config.get("hibernateMode", plan.pack_hibernate_mode))
+    plan.pack_mitosis_mode = bool(config.get("mitosisMode", plan.pack_mitosis_mode))
+    plan.pack_mitosis_strength = config.get("mitosisStrength") or plan.pack_mitosis_strength
+    plan.pack_fade_abrupt = config.get("corruptionFadeType") == "Abrupt"
+    plan.pack_buttonless = bool(config.get("buttonless", plan.pack_buttonless))
 
     moods_list = index.get("moods", [])
     if not moods_list:
@@ -1054,13 +1299,19 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
 class PackBuilderApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Edgeware++ Advanced Pack Builder")
+        self.root.title(f"Edgeware++ Advanced Pack Builder v{TOOL_VERSION}")
         self.root.geometry("820x800")
         apply_theme(self.root)
 
         self.plan = PackPlan()
         self.settings = load_settings()
         self.reconstructed_warnings = []
+
+        # Both sidebars' thumbnail caches - initialized unconditionally here
+        # rather than inside whichever page happens to build first (see the
+        # bugfix note on _get_mood_thumbnail for why that ordering mattered).
+        self._tab_photo_refs = {}
+        self._media_tab_photo_refs = {}
 
         self.source_var = StringVar(value="No folder selected")
         self.pack_tool_var = StringVar(value="Not set (you'll compile manually)")
@@ -1080,10 +1331,16 @@ class PackBuilderApp:
         self.denial_start_var = IntVar(value=0)
         self.denial_end_var = IntVar(value=0)
         self.popups_var = IntVar(value=self.plan.popups_per_mood)
-        self.escalate_var = BooleanVar(value=self.plan.escalate_spirals)
         self.spiral_start_var = IntVar(value=self.plan.spiral_start_pct)
         self.spiral_end_var = IntVar(value=self.plan.spiral_end_pct)
-        self.audio_level_var = IntVar(value=self.plan.audio_mod_when_on)
+
+        # Pack-wide toggles (config.json base "raw" section, not per-mood)
+        self.pack_corruption_mode_var = IntVar(value=1 if self.plan.pack_corruption_mode else 0)
+        self.pack_hibernate_mode_var = IntVar(value=1 if self.plan.pack_hibernate_mode else 0)
+        self.pack_mitosis_mode_var = IntVar(value=1 if self.plan.pack_mitosis_mode else 0)
+        self.pack_mitosis_strength_var = IntVar(value=self.plan.pack_mitosis_strength)
+        self.pack_fade_var = IntVar(value=1 if self.plan.pack_fade_abrupt else 0)
+        self.pack_buttonless_var = IntVar(value=1 if self.plan.pack_buttonless else 0)
 
         self.compress_images_var = BooleanVar(value=False)
         self.compress_videos_var = BooleanVar(value=False)
@@ -1123,28 +1380,63 @@ class PackBuilderApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        scroller = ScrollableFrame(self.root)
+        root_frame = ttk.Frame(self.root)
+        root_frame.pack(fill="both", expand=True)
+
+        # Next pinned to the bottom, outside the scrollable area - this page
+        # was still using the old single-scroller layout from before the
+        # other three pages moved to a pinned bottom bar, so Next scrolled
+        # away with everything else instead of staying put like it does
+        # everywhere else in the app.
+        bottom_bar = ttk.Frame(root_frame, padding=(20, 10))
+        bottom_bar.pack(side="bottom", fill="x")
+        ttk.Separator(root_frame, orient="horizontal").pack(side="bottom", fill="x")
+        self.next_btn = ttk.Button(bottom_bar, text="Next: Whole-Experience Settings", command=self._go_step2,
+                                    state="normal" if self.mood_names else "disabled")
+        self.next_btn.pack(side="right")
+
+        scroller = ScrollableFrame(root_frame)
         scroller.pack(fill="both", expand=True)
         frm = ttk.Frame(scroller.inner, padding=20)
         frm.pack(fill="both", expand=True)
 
         if BANNER_PATH.is_file():
             try:
-                img = tk.PhotoImage(file=str(BANNER_PATH))
-                factor = max(1, img.width() // 260)
-                if factor > 1:
-                    img = img.subsample(factor, factor)
-                self._banner_img = img
+                if HAVE_PIL:
+                    # Pillow gives an exact, smooth resize instead of Tk's
+                    # subsample (integer factors only, which is how the old
+                    # banner ended up rendering way bigger than intended).
+                    # Target width 200px; a max-height safety cap keeps this
+                    # from ever eating most of the page vertically again if
+                    # the banner gets swapped for a wider/more-square image
+                    # later - set comfortably above this banner's own
+                    # 200x329 native size so it doesn't affect this one.
+                    src = Image.open(BANNER_PATH)
+                    target_w = 200
+                    target_h = round(target_w * src.height / src.width)
+                    max_h = 400
+                    if target_h > max_h:
+                        target_h = max_h
+                        target_w = round(max_h * src.width / src.height)
+                    resized = src.resize((target_w, target_h), Image.LANCZOS)
+                    self._banner_img = ImageTk.PhotoImage(resized)
+                else:
+                    img = tk.PhotoImage(file=str(BANNER_PATH))
+                    factor = max(1, img.width() // 200)
+                    if factor > 1:
+                        img = img.subsample(factor, factor)
+                    self._banner_img = img
                 ttk.Label(frm, image=self._banner_img).pack(pady=(0, 10))
-            except tk.TclError:
+            except (tk.TclError, OSError):
                 pass
 
         ttk.Label(frm, text="Edgeware++ Advanced Pack Builder", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(frm, text=f"v{TOOL_VERSION}", style="Muted.TLabel").pack(anchor="w")
 
         if self.reconstructed_warnings:
             warn_frame = tk.Frame(frm, bg=WARN_BG, padx=10, pady=8)
             warn_frame.pack(fill="x", pady=(10, 0))
-            tk.Label(warn_frame, text="Reconstructed pack (approximate) - review before rebuilding:",
+            tk.Label(warn_frame, text="Loaded pack - some things need a look before rebuilding:",
                      bg=WARN_BG, fg=WARN_FG, font=("Segoe UI", 9, "bold"), justify="left").pack(anchor="w")
             for w in self.reconstructed_warnings:
                 tk.Label(warn_frame, text=f"- {w}", bg=WARN_BG, fg=WARN_FG,
@@ -1158,6 +1450,15 @@ class PackBuilderApp:
         load_zip_btn = ttk.Button(load_row, text="Load Existing Pack (ZIP)...", command=self._load_from_zip)
         load_zip_btn.pack(side="left", padx=(8, 0))
         tip(load_zip_btn, TOOLTIPS["load_pack"])
+
+        # Shared small progress indicator for folder scanning / zip
+        # extraction - both can take a visible moment (zip extraction
+        # especially, for packs with real media in them) and used to just
+        # freeze the whole window with no feedback while that happened on
+        # the main thread. Not packed here - shown only while one is running.
+        self.load_status_var = StringVar(value="")
+        self.load_progress = ttk.Progressbar(frm, mode="indeterminate")
+        self.load_status_label = ttk.Label(frm, textvariable=self.load_status_var, style="Muted.TLabel")
 
         ttk.Label(frm, text="Where is the folder of images?", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(18, 0))
         ttk.Label(frm, text="(One subfolder per mood. The first one becomes the pack's starting mood.)",
@@ -1198,10 +1499,6 @@ class PackBuilderApp:
             style="Muted.TLabel", wraplength=650, justify="left"
         ).pack(anchor="w", pady=(6, 0))
 
-        self.next_btn = ttk.Button(frm, text="Next: Whole-Experience Settings", command=self._go_step2,
-                                    state="normal" if self.mood_names else "disabled")
-        self.next_btn.pack(anchor="e", pady=(15, 0))
-
     def _render_mood_list(self):
         for w in self.mood_list_frame.winfo_children():
             w.destroy()
@@ -1213,13 +1510,48 @@ class PackBuilderApp:
             tag = " (starting)" if i == 1 else ""
             ttk.Label(self.mood_list_frame, text=f"  {i}. {name}{tag}").pack(anchor="w")
 
+    def _start_loading(self, message):
+        self.load_progress.pack(fill="x", pady=(6, 2))
+        self.load_status_label.pack(anchor="w", pady=(0, 4))
+        self.load_progress.start(12)
+        self.load_status_var.set(message)
+
+    def _stop_loading(self):
+        self.load_progress.stop()
+        self.load_progress.pack_forget()
+        self.load_status_label.pack_forget()
+
     def _pick_folder(self):
         chosen = filedialog.askdirectory(title="Select folder of mood subfolders")
         if not chosen:
             return
         self.source_var.set(chosen)
         self.plan.source_dir = chosen
-        self.mood_names = scan_moods(Path(chosen))
+
+        self._start_loading("Scanning folder...")
+        result = {"names": None, "error": None}
+
+        def worker():
+            try:
+                result["names"] = scan_moods(Path(chosen))
+            except Exception as e:
+                result["error"] = str(e)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, self._poll_folder_scan, result)
+
+    def _poll_folder_scan(self, result):
+        if result["names"] is None and result["error"] is None:
+            self.root.after(100, self._poll_folder_scan, result)
+            return
+
+        self._stop_loading()
+
+        if result["error"]:
+            messagebox.showerror("Couldn't scan folder", result["error"])
+            return
+
+        self.mood_names = result["names"]
         self.plan.moods = self.mood_names
 
         if not self.mood_names:
@@ -1259,34 +1591,54 @@ class PackBuilderApp:
         chosen = filedialog.askopenfilename(title="Select a pack .zip to load", filetypes=[("Zip files", "*.zip")])
         if not chosen:
             return
-        try:
-            # Extract somewhere STABLE rather than the OS temp folder - a
-            # loaded pack's file paths (wallpapers, media, etc.) get referenced
-            # later at build time, potentially much later, and OS temp dirs
-            # aren't guaranteed to still be there by then.
-            loaded_root = SCRIPT_DIR / "loaded_packs"
-            loaded_root.mkdir(exist_ok=True)
-            stem = "".join(c if (c.isalnum() or c in " -_") else "_" for c in Path(chosen).stem).strip() or "pack"
-            extract_dir = loaded_root / stem
-            i = 1
-            while extract_dir.exists():
-                extract_dir = loaded_root / f"{stem}_{i}"
-                i += 1
-            extract_dir.mkdir(parents=True)
-            with zipfile.ZipFile(chosen) as zf:
-                zf.extractall(extract_dir)
-        except Exception as e:
-            messagebox.showerror("Couldn't open zip", str(e))
-            return
-        self._load_pack(extract_dir)
 
-    def _load_pack(self, folder: Path):
+        self._start_loading("Extracting zip...")
+        result = {"extract_dir": None, "error": None}
+
+        def worker():
+            try:
+                # Extract somewhere STABLE rather than the OS temp folder - a
+                # loaded pack's file paths (wallpapers, media, etc.) get
+                # referenced later at build time, potentially much later, and
+                # OS temp dirs aren't guaranteed to still be there by then.
+                loaded_root = SCRIPT_DIR / "loaded_packs"
+                loaded_root.mkdir(exist_ok=True)
+                stem = "".join(c if (c.isalnum() or c in " -_") else "_" for c in Path(chosen).stem).strip() or "pack"
+                extract_dir = loaded_root / stem
+                i = 1
+                while extract_dir.exists():
+                    extract_dir = loaded_root / f"{stem}_{i}"
+                    i += 1
+                extract_dir.mkdir(parents=True)
+                with zipfile.ZipFile(chosen) as zf:
+                    zf.extractall(extract_dir)
+                result["extract_dir"] = extract_dir
+            except Exception as e:
+                result["error"] = str(e)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, self._poll_zip_extract, result)
+
+    def _poll_zip_extract(self, result):
+        if result["extract_dir"] is None and result["error"] is None:
+            self.root.after(100, self._poll_zip_extract, result)
+            return
+
+        self._stop_loading()
+
+        if result["error"]:
+            messagebox.showerror("Couldn't open zip", result["error"])
+            return
+        self._load_pack(result["extract_dir"], source_zip_dir=str(result["extract_dir"]))
+
+    def _load_pack(self, folder: Path, source_zip_dir: str = ""):
         plan_json_path = find_plan_json(folder)
         self.reconstructed_warnings = []
 
         if plan_json_path:
             try:
-                self.plan = load_plan_json(plan_json_path)
+                self.plan, path_warnings = load_plan_json(plan_json_path)
+                self.reconstructed_warnings = path_warnings
             except Exception as e:
                 messagebox.showerror("Couldn't load plan.json", str(e))
                 return
@@ -1306,6 +1658,7 @@ class PackBuilderApp:
             self.plan = plan
             self.reconstructed_warnings = warnings
 
+        self.plan.loaded_from_zip_dir = source_zip_dir
         self._apply_loaded_plan()
         messagebox.showinfo(
             "Pack loaded",
@@ -1329,10 +1682,15 @@ class PackBuilderApp:
         self.cycle_mode_var.set(self.plan.cycle_mode)
         self.cycle_seconds_var.set(self.plan.cycle_seconds)
         self.popups_var.set(self.plan.popups_per_mood)
-        self.escalate_var.set(self.plan.escalate_spirals)
         self.spiral_start_var.set(self.plan.spiral_start_pct)
         self.spiral_end_var.set(self.plan.spiral_end_pct)
-        self.audio_level_var.set(self.plan.audio_mod_when_on)
+
+        self.pack_corruption_mode_var.set(1 if self.plan.pack_corruption_mode else 0)
+        self.pack_hibernate_mode_var.set(1 if self.plan.pack_hibernate_mode else 0)
+        self.pack_mitosis_mode_var.set(1 if self.plan.pack_mitosis_mode else 0)
+        self.pack_mitosis_strength_var.set(self.plan.pack_mitosis_strength)
+        self.pack_fade_var.set(1 if self.plan.pack_fade_abrupt else 0)
+        self.pack_buttonless_var.set(1 if self.plan.pack_buttonless else 0)
 
         self.compress_images_var.set(self.plan.compress_images)
         self.compress_videos_var.set(self.plan.compress_videos)
@@ -1360,7 +1718,22 @@ class PackBuilderApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        scroller = ScrollableFrame(self.root)
+        root_frame = ttk.Frame(self.root)
+        root_frame.pack(fill="both", expand=True)
+
+        # Same pinned-bottom-bar pattern as the other three pages - this page
+        # was still on the old layout where Back/Next scrolled away with
+        # everything else, just less noticeable here since this page is
+        # short enough not to need scrolling most of the time.
+        bottom_bar = ttk.Frame(root_frame, padding=(20, 10))
+        bottom_bar.pack(side="bottom", fill="x")
+        ttk.Separator(root_frame, orient="horizontal").pack(side="bottom", fill="x")
+        btn_row = ttk.Frame(bottom_bar)
+        btn_row.pack(fill="x")
+        ttk.Button(btn_row, text="Back", command=self._build_step1).pack(side="left")
+        ttk.Button(btn_row, text="Next: Media Review", command=self._go_step_media).pack(side="right")
+
+        scroller = ScrollableFrame(root_frame)
         scroller.pack(fill="both", expand=True)
         frm = ttk.Frame(scroller.inner, padding=20)
         frm.pack(fill="both", expand=True)
@@ -1431,14 +1804,71 @@ class PackBuilderApp:
                        "or popup-count if 'N popups' is selected - matches whichever mode is picked when you click Apply.)",
                   style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w", padx=20, pady=(2, 0))
 
+        packwide_frame = ttk.LabelFrame(frm, text="Pack-Wide Settings", padding=10)
+        packwide_frame.pack(fill="x", pady=5)
+        ttk.Label(packwide_frame,
+                  text="These apply once to the whole pack (Edgeware's own rules - they can't be "
+                       "escalated per-mood like the Advanced Settings on the next page can).",
+                  style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w", pady=(0, 6))
+
+        cm_row = ttk.Frame(packwide_frame)
+        cm_row.pack(fill="x", pady=2)
+        ttk.Label(cm_row, text="Corruption mode", width=24).pack(side="left")
+        cm_toggle = ToggleSwitch(cm_row, self.pack_corruption_mode_var)
+        cm_toggle.pack(side="left")
+        tip(cm_toggle, "Master switch for the whole corruption/mood-cycling system this pack is built "
+                        "around. Leave this ON - turning it off means moods never cycle at all, in-game.")
+
+        hib_row = ttk.Frame(packwide_frame)
+        hib_row.pack(fill="x", pady=2)
+        ttk.Label(hib_row, text="Hibernate mode", width=24).pack(side="left")
+        hib_toggle = ToggleSwitch(hib_row, self.pack_hibernate_mode_var)
+        hib_toggle.pack(side="left")
+        tip(hib_toggle, "Runs Edgeware++ covertly with no popups, then spawns a burst of them all at once "
+                         "after a random delay. Uses Edgeware's own default timing/type settings - fine-tune "
+                         "those in Edgeware's Configure window after loading this pack.")
+
+        mit_row = ttk.Frame(packwide_frame)
+        mit_row.pack(fill="x", pady=2)
+        ttk.Label(mit_row, text="Mitosis mode", width=24).pack(side="left")
+        mit_toggle = ToggleSwitch(mit_row, self.pack_mitosis_mode_var)
+        mit_toggle.pack(side="left")
+        ttk.Label(mit_row, text="  Strength:").pack(side="left", padx=(12, 0))
+        mit_strength_spin = ttk.Spinbox(mit_row, from_=2, to=10, textvariable=self.pack_mitosis_strength_var, width=5)
+        mit_strength_spin.pack(side="left", padx=4)
+
+        def _refresh_mitosis_enabled():
+            on = bool(self.pack_mitosis_mode_var.get())
+            mit_strength_spin.config(state="normal" if on else "disabled")
+
+        mit_toggle._command = _refresh_mitosis_enabled
+        _refresh_mitosis_enabled()
+        tip(mit_toggle, "When a popup is closed, more popups spawn in its place (count set by Strength, "
+                         "Edgeware's own range is 2-10). Safe at slower popup speeds - can cause real "
+                         "performance issues at low delay + high strength together.")
+        tip(mit_strength_spin, "Number of popups that spawn per closed popup when Mitosis mode is on. "
+                                "Grayed out unless Mitosis mode is ON.")
+
+        fade_row = ttk.Frame(packwide_frame)
+        fade_row.pack(fill="x", pady=2)
+        ttk.Label(fade_row, text="Level transition", width=24).pack(side="left")
+        fade_toggle = ToggleSwitch(fade_row, self.pack_fade_var, on_text="Abrupt", off_text="Normal", width=8)
+        fade_toggle.pack(side="left")
+        tip(fade_toggle, "How it looks when the pack switches from one mood/corruption level to the next. "
+                          "Normal fades; Abrupt cuts over instantly.")
+
+        buttonless_row = ttk.Frame(packwide_frame)
+        buttonless_row.pack(fill="x", pady=2)
+        ttk.Label(buttonless_row, text="Buttonless popups", width=24).pack(side="left")
+        buttonless_toggle = ToggleSwitch(buttonless_row, self.pack_buttonless_var)
+        buttonless_toggle.pack(side="left")
+        tip(buttonless_toggle, "When ON, popups can be closed by clicking anywhere on them instead of "
+                                "needing to hit a specific close button.")
+
         spiral_frame = ttk.LabelFrame(frm, text="Escalating Spirals (subliminal overlay chance)", padding=10)
         spiral_frame.pack(fill="x", pady=5)
-        esc_check = ttk.Checkbutton(spiral_frame, text="Spiral overlay chance increases as moods progress",
-                                     variable=self.escalate_var)
-        esc_check.pack(anchor="w")
-        tip(esc_check, TOOLTIPS["escalate_spirals"])
         pct_row = ttk.Frame(spiral_frame)
-        pct_row.pack(anchor="w", padx=20, pady=(2, 0))
+        pct_row.pack(anchor="w")
         ttk.Label(pct_row, text="Start %:").pack(side="left")
         s_spin = ttk.Spinbox(pct_row, from_=0, to=100, textvariable=self.spiral_start_var, width=5)
         s_spin.pack(side="left", padx=(4, 12))
@@ -1451,8 +1881,8 @@ class PackBuilderApp:
         sp_apply_btn.pack(side="left", padx=(12, 0))
         tip(sp_apply_btn, TOOLTIPS["spiral_apply"])
         ttk.Label(spiral_frame,
-                  text="(The checkbox alone auto-ramps this at build time without showing per-mood numbers. "
-                       "Apply writes the actual number into each mood's Advanced Settings so you can see and adjust it.)",
+                  text="Apply writes the actual number into each mood's Advanced Settings, spread evenly, "
+                       "so you can see and adjust it per mood afterward.",
                   style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w", pady=(4, 0))
 
         denial_frame = ttk.LabelFrame(frm, text="Escalating Denial ('not yet!' message chance)", padding=10)
@@ -1472,15 +1902,6 @@ class PackBuilderApp:
         tip(d_apply_btn, TOOLTIPS["denial_apply"])
         ttk.Label(denial_frame, text="Writes into each mood's Advanced Settings on the next page, spread evenly.",
                   style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w", pady=(4, 0))
-
-        audio_lvl_frame = ttk.LabelFrame(frm, text="Audio Chance When Enabled", padding=10)
-        audio_lvl_frame.pack(fill="x", pady=5)
-        al_row = ttk.Frame(audio_lvl_frame)
-        al_row.pack(anchor="w")
-        ttk.Label(al_row, text="Audio popup chance (%) for moods with audio ON:").pack(side="left")
-        al_spin = ttk.Spinbox(al_row, from_=0, to=100, textvariable=self.audio_level_var, width=5)
-        al_spin.pack(side="left", padx=6)
-        tip(al_spin, TOOLTIPS["audio_level"])
 
         extras_frame = ttk.LabelFrame(frm, text="Pack-Wide Extras", padding=10)
         extras_frame.pack(fill="x", pady=5)
@@ -1532,11 +1953,6 @@ class PackBuilderApp:
                                   variable=self.rename_media_var)
             rm.pack(anchor="w")
             tip(rm, TOOLTIPS["rename_media"])
-
-        btn_row = ttk.Frame(frm)
-        btn_row.pack(fill="x", pady=(15, 25))
-        ttk.Button(btn_row, text="Back", command=self._build_step1).pack(side="left")
-        ttk.Button(btn_row, text="Next: Per-Mood Settings", command=self._go_step3).pack(side="right")
 
     def _labeled_entry(self, parent, label, var, tooltip_text=None):
         row = ttk.Frame(parent)
@@ -1597,10 +2013,15 @@ class PackBuilderApp:
         self.plan.cycle_mode = self.cycle_mode_var.get()
         self.plan.cycle_seconds = self.cycle_seconds_var.get()
         self.plan.popups_per_mood = self.popups_var.get()
-        self.plan.escalate_spirals = self.escalate_var.get()
         self.plan.spiral_start_pct = self.spiral_start_var.get()
         self.plan.spiral_end_pct = self.spiral_end_var.get()
-        self.plan.audio_mod_when_on = self.audio_level_var.get()
+
+        self.plan.pack_corruption_mode = bool(self.pack_corruption_mode_var.get())
+        self.plan.pack_hibernate_mode = bool(self.pack_hibernate_mode_var.get())
+        self.plan.pack_mitosis_mode = bool(self.pack_mitosis_mode_var.get())
+        self.plan.pack_mitosis_strength = self.pack_mitosis_strength_var.get()
+        self.plan.pack_fade_abrupt = bool(self.pack_fade_var.get())
+        self.plan.pack_buttonless = bool(self.pack_buttonless_var.get())
 
         self.plan.compress_images = self.compress_images_var.get()
         self.plan.compress_videos = self.compress_videos_var.get()
@@ -1667,9 +2088,396 @@ class PackBuilderApp:
             f"next page to fine-tune individual moods."
         )
 
-    def _go_step3(self):
+    def _go_step_media(self):
         self._sync_step2_into_plan()
-        self._build_step3()
+        self._build_step_media()
+
+    # -- Step 2.5: media review ----------------------------------------------
+
+    def _build_step_media(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+
+        root_frame = ttk.Frame(self.root)
+        root_frame.pack(fill="both", expand=True)
+
+        bottom_bar = ttk.Frame(root_frame, padding=(20, 10))
+        bottom_bar.pack(side="bottom", fill="x")
+        ttk.Separator(root_frame, orient="horizontal").pack(side="bottom", fill="x")
+        btn_row = ttk.Frame(bottom_bar)
+        btn_row.pack(fill="x")
+        ttk.Button(btn_row, text="Back", command=self._go_back_to_step2_from_media).pack(side="left")
+        ttk.Button(btn_row, text="Next: Per-Mood Settings", command=self._build_step3).pack(side="right")
+
+        header = ttk.Frame(root_frame, padding=(20, 15, 20, 5))
+        header.pack(side="top", fill="x")
+        ttk.Label(header, text="Media Review", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Review, add, or remove the images/videos/audio and wallpaper for each "
+                                "mood. Handy for touching up a pack someone else made, not just fresh builds.",
+                  style="Muted.TLabel", wraplength=700, justify="left").pack(anchor="w")
+
+        split = ttk.Frame(root_frame)
+        split.pack(side="top", fill="both", expand=True)
+
+        sidebar_outer = ttk.Frame(split, width=150)
+        sidebar_outer.pack(side="left", fill="y")
+        sidebar_outer.pack_propagate(False)
+        sidebar_scroll = ScrollableFrame(sidebar_outer)
+        sidebar_scroll.pack(fill="both", expand=True)
+        sidebar_scroll.canvas.configure(width=130)
+
+        main_outer = ttk.Frame(split)
+        main_outer.pack(side="left", fill="both", expand=True)
+        main_scroll = ScrollableFrame(main_outer)
+        main_scroll.pack(fill="both", expand=True)
+        self._media_main_scroll = main_scroll
+
+        # Cards are NOT built here anymore - only an empty holder per mood.
+        # This used to build every mood's full thumbnail grid immediately,
+        # which is exactly what was hanging the page open on any pack with a
+        # real amount of media: it meant opening/cropping/resizing every
+        # image in every mood before the page could even render. Now a
+        # mood's card is only actually built (see _select_media_tab) the
+        # first time you click into it, and even that happens in the
+        # background (see _build_media_card's reload_media).
+        self.media_widgets = {}
+        self.media_card_frames = {}
+        self._media_built_moods = set()
+        self._media_tab_photo_refs = {}
+        for i, name in enumerate(self.mood_names):
+            self.media_card_frames[name] = ttk.Frame(main_scroll.inner)
+
+        self.media_tab_widgets = {}
+        self._active_media_mood_name = None
+        for i, name in enumerate(self.mood_names):
+            self._build_media_tab(sidebar_scroll.inner, name, mood_index=i)
+
+        if self.mood_names:
+            self._select_media_tab(self.mood_names[0])
+
+    def _go_back_to_step2_from_media(self):
+        self._build_step2()
+
+    def _build_media_tab(self, parent, mood_name, mood_index):
+        tile = tk.Frame(parent, bg=BG)
+        tile.pack(fill="x", pady=(6, 0), padx=6)
+
+        img_size = 110
+        photo = self._get_mood_thumbnail(mood_name, size=img_size, cache=self._media_tab_photo_refs)
+        if photo:
+            img_label = tk.Label(tile, image=photo, bg=BG, cursor="hand2")
+        else:
+            img_label = tk.Label(tile, text="(no image)", width=14, height=6,
+                                  bg=PANEL_BG, fg=MUTED_FG, cursor="hand2")
+        img_label.pack()
+
+        name_label = tk.Label(tile, text=mood_name, wraplength=140, justify="center",
+                               font=("Segoe UI", 9, "bold"), cursor="hand2", pady=4)
+        name_label.pack(fill="x")
+
+        def on_click(_e=None, name=mood_name):
+            self._select_media_tab(name)
+
+        img_label.bind("<Button-1>", on_click)
+        name_label.bind("<Button-1>", on_click)
+        tile.bind("<Button-1>", on_click)
+
+        self.media_tab_widgets[mood_name] = name_label
+
+    def _select_media_tab(self, mood_name):
+        if mood_name not in self.media_card_frames:
+            return
+
+        if mood_name not in self._media_built_moods:
+            self._build_media_card(self.media_card_frames[mood_name], mood_name,
+                                    mood_index=self.mood_names.index(mood_name))
+            self._media_built_moods.add(mood_name)
+
+        if self._active_media_mood_name and self._active_media_mood_name in self.media_card_frames:
+            self.media_card_frames[self._active_media_mood_name].pack_forget()
+
+        self.media_card_frames[mood_name].pack(fill="both", expand=True)
+        self._active_media_mood_name = mood_name
+
+        for name, lbl in self.media_tab_widgets.items():
+            if name == mood_name:
+                lbl.config(bg=TAB_ACTIVE_BG, fg=TEXT_FG)
+            else:
+                lbl.config(bg=TAB_INACTIVE_BG, fg=TEXT_FG)
+
+        self._media_main_scroll.canvas.yview_moveto(0)
+
+    def _make_collapsible(self, parent, title, default_expanded=True):
+        """Small collapsible section: a clickable header (triangle + title)
+        toggling a content frame below it. Returns the content frame - the
+        caller packs its own children into that."""
+        container = ttk.Frame(parent)
+        container.pack(fill="x", pady=(0, 8))
+
+        state = {"expanded": default_expanded}
+        header_btn = ttk.Button(container)
+        header_btn.pack(fill="x")
+
+        content = ttk.LabelFrame(container, padding=8)
+
+        def redraw():
+            arrow = "\u25be" if state["expanded"] else "\u25b8"
+            header_btn.config(text=f"{arrow} {title}")
+            if state["expanded"]:
+                content.pack(fill="x", pady=(2, 0))
+            else:
+                content.pack_forget()
+
+        def toggle():
+            state["expanded"] = not state["expanded"]
+            redraw()
+
+        header_btn.config(command=toggle)
+        redraw()
+        return content
+
+    def _build_media_card(self, parent, mood_name, mood_index):
+        card = ttk.LabelFrame(parent, text=mood_name, padding=10)
+        card.pack(fill="both", expand=True)
+
+        media_files = materialize_mood_media(self.plan, mood_name)
+        widgets = {"media_files": media_files, "wallpaper_var": None,
+                   "wallpaper_path": self.plan.mood_configs.get(mood_name, {}).get("wallpaper_path", ""),
+                   "_thumb_refs": []}
+        self.media_widgets[mood_name] = widgets
+
+        THUMB_SIZE = 110
+        GRID_COLS = 3
+
+        images_frame = self._make_collapsible(card, "Images")
+        img_status_var = StringVar(value="")
+        img_progress = ttk.Progressbar(images_frame, mode="indeterminate")
+        img_status_label = ttk.Label(images_frame, textvariable=img_status_var, style="Muted.TLabel")
+        img_grid = ttk.Frame(images_frame)
+
+        videos_frame = self._make_collapsible(card, "Videos")
+        vid_grid = ttk.Frame(videos_frame)
+
+        audio_frame = ttk.LabelFrame(card, text="Audio", padding=8)
+        audio_frame.pack(fill="x", pady=(0, 8))
+        audio_list = ttk.Frame(audio_frame)
+        audio_list.pack(fill="x")
+
+        def refresh_audio_list():
+            for w in audio_list.winfo_children():
+                w.destroy()
+            audio_paths = [f for f in widgets["media_files"] if classify_media_file(Path(f)) == "audio"]
+            if not audio_paths:
+                ttk.Label(audio_list, text="No audio files.", style="Muted.TLabel").pack(anchor="w")
+            for path_str in audio_paths:
+                row = ttk.Frame(audio_list)
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text="\u266b", width=4, font=("Segoe UI", 14),
+                         bg=PANEL_BG, fg=TEXT_FG).pack(side="left")
+                ttk.Label(row, text=Path(path_str).name, wraplength=380, justify="left").pack(side="left", padx=(8, 8))
+
+                def remove_file(path_str=path_str):
+                    widgets["media_files"] = [f for f in widgets["media_files"] if f != path_str]
+                    reload_media()
+
+                ttk.Button(row, text="Remove", command=remove_file).pack(side="right")
+
+        def truncate_name(name, limit=18):
+            # The preview image matters far more than the filename - cut it
+            # down rather than let it dominate or wrap the tile.
+            if len(name) <= limit:
+                return name
+            keep = (limit - 3) // 2
+            return name[:keep] + "..." + name[-keep:]
+
+        def build_one_grid(grid_frame, paths, thumbnails, is_video, errors=None):
+            errors = errors or {}
+            for w in grid_frame.winfo_children():
+                w.destroy()
+
+            if not paths:
+                ttk.Label(grid_frame, text=("No videos." if is_video else "No images."),
+                          style="Muted.TLabel").pack(anchor="w")
+                grid_frame.pack(fill="x")
+                return
+
+            for col in range(GRID_COLS):
+                grid_frame.grid_columnconfigure(col, weight=1)
+            for i, path_str in enumerate(paths):
+                p = Path(path_str)
+                tile = ttk.Frame(grid_frame, padding=4)
+                tile.grid(row=i // GRID_COLS, column=i % GRID_COLS, sticky="nsew", padx=4, pady=4)
+
+                photo = thumbnails.get(path_str)
+                if not is_video and photo is not None:
+                    tk.Label(tile, image=photo, bg=PANEL_BG).pack()
+                    widgets["_thumb_refs"].append(photo)
+                elif is_video:
+                    tk.Label(tile, text="\u25b6", width=10, height=5, font=("Segoe UI", 22),
+                             bg=PANEL_BG, fg=TEXT_FG).pack()
+                else:
+                    err_lbl = tk.Label(tile, text="[?]", width=10, height=5, bg=PANEL_BG, fg=MUTED_FG)
+                    err_lbl.pack()
+                    # Used to give zero indication of why a preview failed -
+                    # show the actual error on hover now instead of a bare [?].
+                    err_text = errors.get(path_str)
+                    tip(err_lbl, f"Couldn't load a preview for this file:\n{err_text}" if err_text
+                        else "Couldn't load a preview for this file.")
+
+                name_lbl = ttk.Label(tile, text=truncate_name(p.name))
+                name_lbl.pack()
+                tip(name_lbl, p.name)  # full name still available on hover
+
+                def remove_file(path_str=path_str):
+                    widgets["media_files"] = [f for f in widgets["media_files"] if f != path_str]
+                    reload_media()
+
+                ttk.Button(tile, text="Remove", command=remove_file).pack(pady=(2, 0))
+
+            grid_frame.pack(fill="x")
+
+        def build_grids(thumbnails, errors=None):
+            """thumbnails: dict path_str -> ImageTk.PhotoImage or None (images
+            only). Runs on the main thread only (Tk image objects can't be
+            created off it) - the slow part (opening/cropping/resizing files)
+            already happened in a background thread before this is called."""
+            img_progress.stop()
+            img_progress.pack_forget()
+            img_status_label.pack_forget()
+
+            widgets["_thumb_refs"] = []
+            image_paths = [f for f in widgets["media_files"] if classify_media_file(Path(f)) == "image"]
+            video_paths = [f for f in widgets["media_files"] if classify_media_file(Path(f)) == "video"]
+            build_one_grid(img_grid, image_paths, thumbnails, is_video=False, errors=errors)
+            build_one_grid(vid_grid, video_paths, thumbnails, is_video=True)
+
+        def reload_media():
+            """Regenerate thumbnails in the background so switching moods (or
+            adding/removing a file) never blocks the UI - this used to build
+            every mood's full thumbnail grid eagerly the moment the Media
+            Review page opened, which is exactly what was hanging on packs
+            with any real amount of media. Now it only happens for the
+            currently-selected mood, and the actual file I/O + resizing runs
+            off the main thread."""
+            img_grid.pack_forget()
+            vid_grid.pack_forget()
+            img_status_var.set("Loading previews...")
+            img_progress.pack(fill="x", pady=(4, 2))
+            img_status_label.pack(anchor="w")
+            img_progress.start(12)
+
+            image_paths = [f for f in widgets["media_files"] if classify_media_file(Path(f)) == "image"]
+            result = {"images": None, "errors": {}}
+
+            def worker():
+                imgs = {}
+                errors = {}
+                if HAVE_PIL:
+                    for path_str in image_paths:
+                        try:
+                            img = Image.open(long_path_safe(path_str)).convert("RGB")
+                            w, h = img.size
+                            side = min(w, h)
+                            left, top = (w - side) // 2, (h - side) // 2
+                            img = img.crop((left, top, left + side, top + side)).resize(
+                                (THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
+                            imgs[path_str] = img  # raw PIL Image - PhotoImage must be made on the main thread
+                        except Exception as e:
+                            # Used to be a bare `except Exception: imgs[path_str] = None` -
+                            # every failure just silently became "[?]" with no way to tell
+                            # why. Most likely cause on Windows with real, descriptively-
+                            # named files: the classic 260-character path limit, which
+                            # plain open() hits as a FileNotFoundError even though the file
+                            # genuinely exists - long_path_safe() above should dodge that,
+                            # but keep the actual reason around in case it's something else.
+                            imgs[path_str] = None
+                            errors[path_str] = f"{type(e).__name__}: {e}"
+                result["images"] = imgs
+                result["errors"] = errors
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            def poll():
+                if result["images"] is None:
+                    self.root.after(80, poll)
+                    return
+                photos = {k: (ImageTk.PhotoImage(v) if v is not None else None) for k, v in result["images"].items()}
+                build_grids(photos, errors=result.get("errors"))
+
+            self.root.after(80, poll)
+            refresh_audio_list()
+
+        def add_images():
+            chosen = filedialog.askopenfilenames(
+                title=f"Add images for mood '{mood_name}'",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp")]
+            )
+            if chosen:
+                widgets["media_files"].extend(chosen)
+                reload_media()
+
+        def add_videos():
+            chosen = filedialog.askopenfilenames(
+                title=f"Add videos for mood '{mood_name}'",
+                filetypes=[("Videos", "*.mp4 *.webm *.mov *.avi *.mkv *.wmv *.m4v")]
+            )
+            if chosen:
+                widgets["media_files"].extend(chosen)
+                reload_media()
+
+        def add_audio():
+            chosen = filedialog.askopenfilenames(
+                title=f"Add audio files for mood '{mood_name}'",
+                filetypes=[("Audio", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac")]
+            )
+            if chosen:
+                widgets["media_files"].extend(chosen)
+                reload_media()
+
+        ttk.Button(images_frame, text="Add Images...", command=add_images).pack(anchor="w", pady=(6, 0))
+        ttk.Button(videos_frame, text="Add Videos...", command=add_videos).pack(anchor="w", pady=(6, 0))
+        ttk.Button(audio_frame, text="Add Audio Files...", command=add_audio).pack(anchor="w", pady=(6, 0))
+
+        reload_media()
+
+        # Wallpaper - moved here from the Per-Mood page, unchanged otherwise.
+        wp_frame = ttk.LabelFrame(card, text="Wallpaper", padding=8)
+        wp_frame.pack(fill="x")
+        wp_row = ttk.Frame(wp_frame)
+        wp_row.pack(fill="x")
+        existing = self.plan.mood_configs.get(mood_name, {})
+        wp_var = BooleanVar(value=existing.get("wallpaper_change", False))
+        wp_check = ttk.Checkbutton(wp_row, text="Change wallpaper when this mood starts", variable=wp_var)
+        wp_check.pack(side="left")
+        tip(wp_check, TOOLTIPS["wallpaper_checkbox"])
+        wp_name_label = ttk.Label(
+            wp_row, text=(Path(widgets["wallpaper_path"]).name if widgets["wallpaper_path"] else "No image selected"),
+            style="Muted.TLabel"
+        )
+
+        def choose_wp(w=widgets, lbl=wp_name_label):
+            chosen = filedialog.askopenfilename(
+                title=f"Choose wallpaper for mood '{mood_name}'",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif")]
+            )
+            if chosen:
+                w["wallpaper_path"] = chosen
+                lbl.config(text=Path(chosen).name)
+
+        wp_choose_btn = ttk.Button(wp_row, text="Choose Image...", command=choose_wp)
+        wp_choose_btn.pack(side="left", padx=(8, 8))
+        tip(wp_choose_btn, TOOLTIPS["wallpaper_choose"])
+        wp_name_label.pack(side="left")
+
+        def clear_wp(w=widgets, lbl=wp_name_label):
+            w["wallpaper_path"] = ""
+            lbl.config(text="No image selected")
+
+        wp_clear_btn = ttk.Button(wp_row, text="Clear", command=clear_wp)
+        wp_clear_btn.pack(side="left", padx=(8, 0))
+        tip(wp_clear_btn, TOOLTIPS["wallpaper_clear"])
+        widgets["wallpaper_var"] = wp_var
+
 
     # -- Step 3: per-mood settings -------------------------------------------
 
@@ -1677,56 +2485,206 @@ class PackBuilderApp:
         for w in self.root.winfo_children():
             w.destroy()
 
-        scroller = ScrollableFrame(self.root)
-        scroller.pack(fill="both", expand=True)
-        frm = ttk.Frame(scroller.inner, padding=20)
-        frm.pack(fill="both", expand=True)
+        root_frame = ttk.Frame(self.root)
+        root_frame.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text="Per-Mood Configuration", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
-        ttk.Label(frm, text="Click a mood's name to expand its settings.", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
-
-        self.mood_widgets = {}
-        for i, name in enumerate(self.mood_names):
-            self._build_mood_card(frm, name, mood_index=i)
+        # Bottom bar first, packed to the bottom, so it stays pinned outside
+        # both scrollable panes no matter how tall they get.
+        bottom_bar = ttk.Frame(root_frame, padding=(20, 10))
+        bottom_bar.pack(side="bottom", fill="x")
+        ttk.Separator(root_frame, orient="horizontal").pack(side="bottom", fill="x")
 
         self.status_var = StringVar(value="")
-        self.progress = ttk.Progressbar(frm, mode="indeterminate")
-        self.status_label = ttk.Label(frm, textvariable=self.status_var, style="Muted.TLabel")
+        self.progress = ttk.Progressbar(bottom_bar, mode="indeterminate")
+        self.status_label = ttk.Label(bottom_bar, textvariable=self.status_var, style="Muted.TLabel")
 
-        btn_row = ttk.Frame(frm)
-        btn_row.pack(fill="x", pady=(15, 25))
-        ttk.Button(btn_row, text="Back", command=self._go_back_to_step2).pack(side="left")
+        btn_row = ttk.Frame(bottom_bar)
+        btn_row.pack(fill="x")
+        ttk.Button(btn_row, text="Back", command=self._go_back_to_media_from_step3).pack(side="left")
         self.build_btn = ttk.Button(btn_row, text="Build Pack", command=self._collect_and_build)
         self.build_btn.pack(side="right")
 
-    def _go_back_to_step2(self):
+        header = ttk.Frame(root_frame, padding=(20, 15, 20, 5))
+        header.pack(side="top", fill="x")
+        ttk.Label(header, text="Per-Mood Configuration", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Pick a mood on the left to edit its settings. Nothing is lost switching "
+                                "between them.", style="Muted.TLabel").pack(anchor="w")
+        if not HAVE_PIL:
+            ttk.Label(header, text="(Pillow isn't installed, so tab thumbnails are plain placeholders - "
+                                    "run: pip install pillow)",
+                      style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+
+        split = ttk.Frame(root_frame)
+        split.pack(side="top", fill="both", expand=True)
+
+        sidebar_outer = ttk.Frame(split, width=150)
+        sidebar_outer.pack(side="left", fill="y")
+        sidebar_outer.pack_propagate(False)  # hold the 150px width regardless of child sizes
+        sidebar_scroll = ScrollableFrame(sidebar_outer)
+        sidebar_scroll.pack(fill="both", expand=True)
+        # The scrollbar was losing the width fight to the canvas's
+        # expand=True inside this narrow, propagation-locked 150px parent
+        # (ttk.Scrollbar was getting squeezed to 0px and never actually
+        # showing, even with 10+ moods needing to scroll). Giving the canvas
+        # an explicit width leaves guaranteed room for the scrollbar instead
+        # of both fighting over the same 150px.
+        sidebar_scroll.canvas.configure(width=130)
+
+        main_outer = ttk.Frame(split)
+        main_outer.pack(side="left", fill="both", expand=True)
+        main_scroll = ScrollableFrame(main_outer)
+        main_scroll.pack(fill="both", expand=True)
+        self._mood_main_scroll = main_scroll
+
+        # Force Tk to actually compute current geometry now rather than
+        # measuring a stale/zero width before layout has settled - this is
+        # a one-time decision per page-3 build (Back then Forward re-measures
+        # fresh), not a live reflow while the window is being dragged.
+        self.root.update_idletasks()
+        available_width = main_outer.winfo_width()
+        self._advanced_columns = 2 if available_width >= 700 else 1
+
+        # Build every mood's full card up front, each into its own holder
+        # frame, and keep them all alive for the lifetime of this page -
+        # switching tabs just shows/hides a holder, nothing is destroyed or
+        # re-parsed, so in-progress edits can never be lost by clicking
+        # between tabs.
+        self.mood_widgets = {}
+        self.mood_card_frames = {}
+        self._tab_photo_refs = {}
+        for i, name in enumerate(self.mood_names):
+            card_holder = ttk.Frame(main_scroll.inner)
+            self._build_mood_card(card_holder, name, mood_index=i)
+            self.mood_card_frames[name] = card_holder
+
+        self.mood_tab_widgets = {}
+        self._active_mood_name = None
+        for i, name in enumerate(self.mood_names):
+            self._build_mood_tab(sidebar_scroll.inner, name, mood_index=i)
+
+        if self.mood_names:
+            self._select_mood_tab(self.mood_names[0])
+
+    def _get_mood_thumbnail(self, mood_name, size=110, cache=None):
+        """Pick a random image from this mood's source, center-crop to a
+        square, resize to `size`, return an ImageTk.PhotoImage. Returns None
+        on any failure (no Pillow, no images found, unreadable file) so
+        callers can fall back to a plain placeholder.
+
+        `cache` must be a dict the caller keeps a live reference to for as
+        long as the resulting image needs to stay on screen - Tk drops a
+        PhotoImage as soon as nothing still references it, even if it's
+        actively packed into a visible Label. BUG HISTORY: this used to
+        always write into self._tab_photo_refs, which only ever got
+        initialized inside _build_step3 - fine when Per-Mood was the only
+        caller, but once the Media Review page started calling this too
+        (and now runs BEFORE Per-Mood in the flow), the first-ever call hit
+        a genuine AttributeError on self._tab_photo_refs not existing yet.
+        That line was inside a bare `except Exception: continue`, so it
+        silently ate the error and just moved to the next candidate file -
+        which failed the same way - until every candidate was exhausted and
+        it returned None. Second visit "worked" only because Per-Mood had
+        been visited at least once by then, creating the attribute for
+        good. Passing the cache in explicitly instead removes the shared,
+        order-dependent implicit state entirely.
+        """
+        if not HAVE_PIL:
+            return None
+        if cache is None:
+            cache = self._tab_photo_refs
+
+        mc = self.plan.mood_configs.get(mood_name, {})
+        candidates = []
+        explicit = mc.get("media_files") or []
+        if explicit:
+            candidates = [Path(p) for p in explicit]
+        elif self.plan.source_dir:
+            mood_dir = Path(self.plan.source_dir) / mood_name
+            if mood_dir.is_dir():
+                candidates = [p for p in mood_dir.iterdir() if p.is_file()]
+
+        image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+        candidates = [p for p in candidates if p.suffix.lower() in image_exts]
+        if not candidates:
+            return None
+
+        random.shuffle(candidates)
+        for path in candidates:
+            try:
+                img = Image.open(long_path_safe(str(path)))
+                img = img.convert("RGB")
+                w, h = img.size
+                side = min(w, h)
+                left = (w - side) // 2
+                top = (h - side) // 2
+                img = img.crop((left, top, left + side, top + side))
+                img = img.resize((size, size), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                cache[mood_name] = photo  # keep alive - Tk drops GC'd images
+                return photo
+            except Exception:
+                continue  # try the next candidate if this file won't open
+        return None
+
+    def _build_mood_tab(self, parent, mood_name, mood_index):
+        tile = tk.Frame(parent, bg=BG)
+        tile.pack(fill="x", pady=(6, 0), padx=6)
+
+        img_size = 110
+        photo = self._get_mood_thumbnail(mood_name, size=img_size)
+        if photo:
+            img_label = tk.Label(tile, image=photo, bg=BG, cursor="hand2")
+        else:
+            img_label = tk.Label(tile, text="(no image)", width=14, height=6,
+                                  bg=PANEL_BG, fg=MUTED_FG, cursor="hand2")
+        img_label.pack()
+
+        name_label = tk.Label(tile, text=mood_name, wraplength=140, justify="center",
+                               font=("Segoe UI", 9, "bold"), cursor="hand2", pady=4)
+        name_label.pack(fill="x")
+
+        def on_click(_e=None, name=mood_name):
+            self._select_mood_tab(name)
+
+        img_label.bind("<Button-1>", on_click)
+        name_label.bind("<Button-1>", on_click)
+        tile.bind("<Button-1>", on_click)
+
+        self.mood_tab_widgets[mood_name] = name_label
+
+    def _select_mood_tab(self, mood_name):
+        if mood_name not in self.mood_card_frames:
+            return
+
+        if self._active_mood_name and self._active_mood_name in self.mood_card_frames:
+            self.mood_card_frames[self._active_mood_name].pack_forget()
+
+        self.mood_card_frames[mood_name].pack(fill="both", expand=True)
+        self._active_mood_name = mood_name
+
+        for name, lbl in self.mood_tab_widgets.items():
+            if name == mood_name:
+                lbl.config(bg=TAB_ACTIVE_BG, fg=TEXT_FG)
+            else:
+                lbl.config(bg=TAB_INACTIVE_BG, fg=TEXT_FG)
+
+        # Jump the main pane's scroll position back to the top for the
+        # newly-selected mood, rather than leaving it wherever the previous
+        # mood's card happened to be scrolled to.
+        self._mood_main_scroll.canvas.yview_moveto(0)
+
+    def _go_back_to_media_from_step3(self):
         self._sync_moods_into_plan(strict=False)
-        self._build_step2()
+        self._build_step_media()
 
     def _build_mood_card(self, parent, mood_name, mood_index):
         existing = self.plan.mood_configs.get(mood_name, {})
 
-        outer = ttk.Frame(parent)
-        outer.pack(fill="x", pady=4)
-
-        state = {"expanded": False}
-        toggle_btn = ttk.Button(outer, text=f"\u25b8 {mood_name}" + (" (starting mood)" if mood_index == 0 else ""))
-        toggle_btn.pack(fill="x")
-        tip(toggle_btn, TOOLTIPS["mood_card_toggle"])
-
-        card = ttk.LabelFrame(outer, padding=10)
-        # not packed - starts collapsed
-
-        def toggle():
-            if state["expanded"]:
-                card.pack_forget()
-                toggle_btn.config(text=f"\u25b8 {mood_name}" + (" (starting mood)" if mood_index == 0 else ""))
-            else:
-                card.pack(fill="x", pady=(2, 0))
-                toggle_btn.config(text=f"\u25be {mood_name}" + (" (starting mood)" if mood_index == 0 else ""))
-            state["expanded"] = not state["expanded"]
-
-        toggle_btn.config(command=toggle)
+        # No collapse/expand chrome here anymore - the sidebar (see
+        # _build_step3) shows one mood's full card at a time in the main
+        # panel, so there's no clutter left to collapse against.
+        card = ttk.LabelFrame(parent, text=mood_name + (" (starting mood)" if mood_index == 0 else ""), padding=10)
+        card.pack(fill="both", expand=True)
 
         ttk.Label(card, text="Add captions here for this mood. Use linebreaks (Enter) to start the next caption.",
                   style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w")
@@ -1793,44 +2751,7 @@ class PackBuilderApp:
         widgets = {"captions_text": captions_text, "notif_text": notif_text,
                    "subliminal_text": subliminal_text, "prompts_text": prompts_text,
                    "denial_text": denial_text, "web_text": web_text,
-                   "wallpaper_var": None, "wallpaper_path": existing.get("wallpaper_path", ""),
-                   "audio_var": None, "audio_paths": list(existing.get("audio_paths", [])),
-                   "advanced_vars": {}, "remove_vars": {},
-                   "media_files": list(existing.get("media_files", []))}
-
-        wp_row = ttk.Frame(card)
-        wp_row.pack(fill="x", pady=2)
-        wp_var = BooleanVar(value=existing.get("wallpaper_change", False))
-        wp_check = ttk.Checkbutton(wp_row, text="Wallpaper", variable=wp_var, width=12)
-        wp_check.pack(side="left")
-        tip(wp_check, TOOLTIPS["wallpaper_checkbox"])
-        wp_name_label = ttk.Label(
-            wp_row, text=(Path(widgets["wallpaper_path"]).name if widgets["wallpaper_path"] else "No image selected"),
-            style="Muted.TLabel"
-        )
-
-        def choose_wp(w=widgets, lbl=wp_name_label):
-            chosen = filedialog.askopenfilename(
-                title=f"Choose wallpaper for mood '{mood_name}'",
-                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif")]
-            )
-            if chosen:
-                w["wallpaper_path"] = chosen
-                lbl.config(text=Path(chosen).name)
-
-        wp_choose_btn = ttk.Button(wp_row, text="Choose Image...", command=choose_wp)
-        wp_choose_btn.pack(side="left", padx=(8, 8))
-        tip(wp_choose_btn, TOOLTIPS["wallpaper_choose"])
-        wp_name_label.pack(side="left")
-
-        def clear_wp(w=widgets, lbl=wp_name_label):
-            w["wallpaper_path"] = ""
-            lbl.config(text="No image selected")
-
-        wp_clear_btn = ttk.Button(wp_row, text="Clear", command=clear_wp)
-        wp_clear_btn.pack(side="left", padx=(8, 0))
-        tip(wp_clear_btn, TOOLTIPS["wallpaper_clear"])
-        widgets["wallpaper_var"] = wp_var
+                   "advanced_vars": {}, "remove_vars": {}}
 
         # Only moods BEFORE this one can be removed when this one starts.
         earlier_moods = self.mood_names[:mood_index]
@@ -1850,81 +2771,100 @@ class PackBuilderApp:
                 tip(rc, TOOLTIPS["remove_moods"])
                 widgets["remove_vars"][name] = rv
 
-        audio_row = ttk.Frame(card)
-        audio_row.pack(fill="x", pady=2)
-        audio_var = BooleanVar(value=existing.get("audio_enabled", False))
-        audio_check = ttk.Checkbutton(audio_row, text="Audio", variable=audio_var, width=12)
-        audio_check.pack(side="left")
-        tip(audio_check, TOOLTIPS["audio_checkbox"])
-        audio_names = [Path(p).name for p in widgets["audio_paths"]]
-        audio_files_label = ttk.Label(
-            audio_row, text=(f"{len(audio_names)} file(s): " + ", ".join(audio_names)) if audio_names else "No files selected",
-            style="Muted.TLabel", wraplength=420, justify="left"
-        )
-
-        def add_audio(w=widgets, lbl=audio_files_label):
-            chosen = filedialog.askopenfilenames(
-                title=f"Add audio files for mood '{mood_name}' (multi-select allowed)",
-                filetypes=[("Audio", "*.mp3 *.wav *.ogg *.flac")]
-            )
-            if chosen:
-                w["audio_paths"].extend(chosen)
-                names = [Path(p).name for p in w["audio_paths"]]
-                lbl.config(text=f"{len(names)} file(s): " + ", ".join(names))
-
-        audio_add_btn = ttk.Button(audio_row, text="Add Audio Files...", command=add_audio)
-        audio_add_btn.pack(side="left", padx=(8, 8))
-        tip(audio_add_btn, TOOLTIPS["audio_add"])
-        audio_files_label.pack(side="left")
-
-        def clear_audio(w=widgets, lbl=audio_files_label):
-            w["audio_paths"] = []
-            lbl.config(text="No files selected")
-
-        audio_clear_btn = ttk.Button(audio_row, text="Clear", command=clear_audio)
-        audio_clear_btn.pack(side="left", padx=(8, 0))
-        tip(audio_clear_btn, TOOLTIPS["audio_clear"])
-        widgets["audio_var"] = audio_var
-
         self._build_advanced_section(card, mood_name, widgets, existing.get("advanced", {}))
 
         self.mood_widgets[mood_name] = widgets
 
     def _build_advanced_section(self, card, mood_name, widgets, existing_advanced):
-        state = {"expanded": False}
-
-        toggle_btn = ttk.Button(card, text="\u25b8 Advanced Settings (optional)")
-        toggle_btn.pack(anchor="w", pady=(6, 0))
-        tip(toggle_btn, TOOLTIPS["advanced_toggle"])
+        # Always-visible full section now (used to be collapsed behind a
+        # toggle button) - just a spacer/separator to set it apart from the
+        # normal fields above, then straight into the groups.
+        ttk.Frame(card, height=14).pack(fill="x")
+        ttk.Separator(card, orient="horizontal").pack(fill="x", pady=(0, 8))
+        ttk.Label(card, text="Advanced Settings", font=("Segoe UI", 11, "bold")).pack(anchor="w")
 
         adv_frame = ttk.Frame(card)
-
-        def toggle():
-            if state["expanded"]:
-                adv_frame.pack_forget()
-                toggle_btn.config(text="\u25b8 Advanced Settings (optional)")
-            else:
-                adv_frame.pack(fill="x", pady=(6, 0), padx=(10, 0))
-                toggle_btn.config(text="\u25be Advanced Settings (optional)")
-            state["expanded"] = not state["expanded"]
-
-        toggle_btn.config(command=toggle)
+        adv_frame.pack(fill="x", pady=(6, 0))
 
         ttk.Label(adv_frame, text=TOOLTIPS["advanced_note"], style="Muted.TLabel",
                   wraplength=600, justify="left").pack(anchor="w", pady=(0, 6))
 
+        # Decided once per page-3 build (see _build_step3), not live-reflowed
+        # on resize - 2 columns if the main panel was wide enough at build
+        # time, otherwise the plain single-column stack.
+        columns = getattr(self, "_advanced_columns", 1)
+
         for group_name, fields in ADVANCED_FIELD_GROUPS:
             group = ttk.LabelFrame(adv_frame, text=group_name, padding=8)
             group.pack(fill="x", pady=4)
-            for key, label, tooltip_text in fields:
-                row = ttk.Frame(group)
+
+            if columns == 2:
+                cols_row = ttk.Frame(group)
+                cols_row.pack(fill="x")
+                left_col = ttk.Frame(cols_row)
+                left_col.pack(side="left", fill="both", expand=True, padx=(0, 14))
+                right_col = ttk.Frame(cols_row)
+                right_col.pack(side="left", fill="both", expand=True)
+                col_targets = [left_col, right_col]
+            else:
+                col_targets = [group]
+
+            for idx, (key, label, tooltip_text) in enumerate(fields):
+                target = col_targets[idx % columns]
+                row = ttk.Frame(target)
                 row.pack(fill="x", pady=1)
                 ttk.Label(row, text=label, width=32).pack(side="left")
                 initial = existing_advanced.get(key, "")
                 var = StringVar(value=str(initial) if initial != "" else "")
-                entry = ttk.Entry(row, textvariable=var, width=10)
-                entry.pack(side="left")
-                tip(entry, tooltip_text)
+
+                if key in ADVANCED_BOOL_KEYS:
+                    # Tri-state: blank (inherit from previous mood, like every
+                    # other Advanced field) / ON / OFF. A plain 2-state switch
+                    # can't represent "inherit", so this cycles through all
+                    # three on click instead of just flipping.
+                    #
+                    # BUGFIX: paint/cycle used to be defined with plain `def`
+                    # directly in this loop body, so `paint` was a name in
+                    # _build_advanced_section's own scope that got reassigned
+                    # every iteration - every field's `cycle` closure looked
+                    # up "paint" by name at CALL time, not definition time, so
+                    # every single toggle ended up calling whichever field's
+                    # paint happened to be defined LAST (singleMode, being
+                    # last in the field list). Clicking any other toggle
+                    # updated its own variable fine but then painted the
+                    # wrong label. Fixed by giving each field its own fully
+                    # self-contained pair via a factory, so nothing is shared
+                    # across iterations.
+                    def make_toggle_handlers(v, widget):
+                        def paint():
+                            cur = v.get()
+                            if cur == "1":
+                                widget.config(text="ON", bg=TAB_ACTIVE_BG, fg=TEXT_FG)
+                            elif cur == "0":
+                                widget.config(text="OFF", bg=TAB_INACTIVE_BG, fg=TEXT_FG)
+                            else:
+                                widget.config(text="(inherit)", bg=PANEL_BG, fg=MUTED_FG)
+
+                        def cycle(_e=None):
+                            cur = v.get()
+                            nxt = {"": "1", "1": "0", "0": ""}[cur if cur in ("", "1", "0") else ""]
+                            v.set(nxt)
+                            paint()
+
+                        return paint, cycle
+
+                    toggle_lbl = tk.Label(row, width=10, anchor="center", cursor="hand2",
+                                           font=("Segoe UI", 9, "bold"))
+                    paint_fn, cycle_fn = make_toggle_handlers(var, toggle_lbl)
+                    paint_fn()
+                    toggle_lbl.bind("<Button-1>", cycle_fn)
+                    toggle_lbl.pack(side="left")
+                    tip(toggle_lbl, tooltip_text + " Click to cycle: inherit -> ON -> OFF -> inherit.")
+                else:
+                    entry = ttk.Entry(row, textvariable=var, width=10)
+                    entry.pack(side="left")
+                    tip(entry, tooltip_text)
+
                 widgets["advanced_vars"][key] = var
 
     # -- Sync + build ---------------------------------------------------------
@@ -1976,6 +2916,7 @@ class PackBuilderApp:
         for name, w in self.mood_widgets.items():
             advanced = self._parse_advanced(w["advanced_vars"], name, parse_errors, strict)
             remove_moods = [n for n, var in w["remove_vars"].items() if var.get()]
+            mw = self.media_widgets.get(name, {}) if hasattr(self, "media_widgets") else {}
             mc = asdict(MoodConfig(
                 name=name,
                 captions=self._lines(w["captions_text"]),
@@ -1984,13 +2925,14 @@ class PackBuilderApp:
                 prompts=self._lines(w["prompts_text"]),
                 denial_captions=self._lines(w["denial_text"]),
                 web_entries=self._parse_web_lines(w["web_text"]),
-                wallpaper_change=bool(w["wallpaper_var"].get()) if w["wallpaper_var"] else False,
-                wallpaper_path=w["wallpaper_path"],
-                audio_enabled=bool(w["audio_var"].get()),
-                audio_paths=list(w["audio_paths"]),
+                wallpaper_change=bool(mw["wallpaper_var"].get()) if mw.get("wallpaper_var") else
+                    self.plan.mood_configs.get(name, {}).get("wallpaper_change", False),
+                wallpaper_path=mw.get("wallpaper_path", self.plan.mood_configs.get(name, {}).get("wallpaper_path", "")),
+                audio_enabled=self.plan.mood_configs.get(name, {}).get("audio_enabled", False),
+                audio_paths=[],
                 advanced=advanced,
                 remove_moods=remove_moods,
-                media_files=list(w.get("media_files", [])),
+                media_files=list(mw.get("media_files", self.plan.mood_configs.get(name, {}).get("media_files", []))),
             ))
             mood_configs[name] = mc
         self.plan.mood_configs = mood_configs
@@ -2103,6 +3045,7 @@ class PackBuilderApp:
 
                 zip_directory(build_dir, zip_path, status_cb=self._set_status)
                 self._build_result["zip_path"] = zip_path
+                self._build_result["build_dir"] = build_dir
             except Exception as e:
                 self._build_result["error"] = str(e)
             finally:
@@ -2161,6 +3104,30 @@ class PackBuilderApp:
             f"(pack_source/ and pack_build/ inside that same folder are working files - "
             f"safe to delete once you've confirmed the zip works.){warn_note}{yaml_note}{perm_note}"
         )
+
+        build_dir = self._build_result.get("build_dir")
+        zip_dir_loaded = self.plan.loaded_from_zip_dir
+        cleanup_targets = [p for p in (out_dir, build_dir) if p and Path(p).exists()]
+        cleanup_note = (
+            "Delete the temporary working files now that everything's safely inside the built zip?\n\n"
+            + "\n".join(f"  - {p}" for p in cleanup_targets)
+        )
+        if zip_dir_loaded and Path(zip_dir_loaded).exists():
+            cleanup_note += (
+                f"\n  - {zip_dir_loaded}\n    (the original extracted copy from when this pack was loaded - "
+                f"its contents are already inside pack_source/ above, and everything's already zipped)"
+            )
+            cleanup_targets.append(zip_dir_loaded)
+
+        if cleanup_targets and messagebox.askyesno("Delete temp files?", cleanup_note):
+            failed = []
+            for p in cleanup_targets:
+                try:
+                    shutil.rmtree(p)
+                except OSError as e:
+                    failed.append(f"{p} ({e})")
+            if failed:
+                messagebox.showwarning("Some files couldn't be deleted", "\n".join(failed))
 
 
 def main():
