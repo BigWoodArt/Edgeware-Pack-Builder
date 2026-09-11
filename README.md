@@ -119,20 +119,6 @@ Media Review, and Per-Mood Configuration.
   screen image), and build options (image/video compression, filename
   renaming) if a Pack Tool folder is set.
 
-**Seconds, not minutes:** cycle length is now entered in seconds. This
-followed from finding that Edgeware++'s own `config.pyw` offers a
-seconds-based entry mode for this same setting, which is stronger
-evidence than what I had before (a single log value that was *consistent
-with* minutes but didn't actually prove it). The number you enter is
-now sent to Edgeware's `corruptionTime` field completely unconverted -
-no more risk of a unit-conversion bug like the last one. **Still worth
-confirming in-game** that actual cycle timing matches what you set,
-since the exact native unit hasn't been independently confirmed, just
-narrowed down with better evidence. If you reload an older pack built
-before this change, its cycle length will reset to the default (5
-minutes' worth, now expressed as 300 seconds) since the field was
-renamed - a one-time inconvenience, not a repeating one.
-
 ### Page 3 - Media Review
 
 A sidebar of mood tabs (same cropped-thumbnail style as the Per-Mood
@@ -183,8 +169,7 @@ Inside each mood's settings:
   that isn't active yet). Leave everything unchecked and this mood's
   content just adds on top of what's already showing; check specific
   earlier moods to turn them off.
-- **Advanced Settings** - always visible below the fields above (no
-  more expand/collapse), automatically laid out in two columns per
+- **Advanced Settings** - automatically laid out in two columns per
   group instead of one if the window's wide enough when the page is
   built. Covers popup speed, image/video/web/prompt chance, auto-close/
   single-popup-mode (on/off switches, not text fields), audio/video
@@ -201,20 +186,6 @@ Inside each mood's settings:
   of those you'll see real numbers already filled in here, ready to
   hand-tune.
 
-  **Two different "subliminal" features, easy to mix up:** Edgeware++
-  has a hypno/spiral picture overlay (config keys `subliminalsChance` /
-  `subliminalsAlpha`, labeled here as "Hypno overlay chance/strength")
-  *and*, separately, subliminal caption text - the actual "Subliminal
-  messages" you type in per mood (config keys `capPopChance` /
-  `capPopOpacity` / `capPopTimer`, labeled here as "Subliminal text
-  chance/opacity/duration"). The names are backwards from what you'd
-  guess - `subliminalsChance` is the *picture* overlay, not the text.
-  Use the "Hypno overlay" fields to ramp the spiral picture, and the
-  "Subliminal text" fields to ramp how often/how visible/how long your
-  actual subliminal message text shows up. Escalating the wrong pair is
-  a real trap: the pack will build and run fine, it'll just be ramping
-  something other than what you intended, silently.
-
 **Hover over anything** for a plain-language explanation.
 
 **One setting you have to turn on yourself:** everything in a mood's
@@ -222,18 +193,7 @@ Advanced Settings (and anything a Preset or Page 2 Apply button writes
 into it) is delivered to Edgeware++ as per-level `config` overrides in
 `corruption.json`. Those overrides only take effect if **"Allow full
 corruption permissions" (`corruptionFullPerm`)** is turned on in
-Edgeware's own Configure window - this can't be turned on by the pack
-itself, only by whoever runs it, and it has to be done (and saved)
-before launching. Without it, moods will still add and remove on
-schedule, but every escalation - popup speed, hypno overlay, subliminal
-text, denial chance, all of it - will stay flat at whatever the base
-config already has, and the pack will look static despite being built
-correctly. A reminder about this is now also shown in the "Pack
-built!" dialog after every build.
-
-Nothing you enter is lost by clicking **Back** - the app saves the
-current page into memory before switching, and restores everything if
-you come back to it.
+Edgeware's own Configure window.
 
 ### Building
 
@@ -282,16 +242,7 @@ Two buttons on Page 1: **Load Existing Pack (Folder)** and **(ZIP)**.
   buckets using `media.json`'s own tags.
 
   **This reconstruction path is best-effort and not yet verified
-  against a real compiled pack's exact JSON layout** - it's built from
-  pack.yml's documented structure (which the compiler is described as
-  generating these files from) plus the `config.json` shape confirmed
-  from actual Edgeware++ log output. If a file doesn't parse the way
-  expected, that specific piece is skipped (not the whole load) and
-  reported back to you as a warning banner on the front page, rather
-  than failing silently. If reconstruction doesn't work well on a real
-  pack, the warnings + the actual `info.json`/`index.json`/`media.json`/
-  `corruption.json` contents are exactly what's needed to fix it - same
-  as everything else in this project so far.
+  against a real compiled pack's exact JSON layout** 
 
 ## What to test / report back
 
@@ -316,11 +267,6 @@ Two buttons on Page 1: **Load Existing Pack (Folder)** and **(ZIP)**.
   if you load a pack, walk away, and build much later. Old subfolders
   in there are safe to delete once you're done with that particular
   loaded pack.
-- If a wallpaper file referenced by a mood (or the default wallpaper)
-  can't be found at build time, the build now stops with a clear error
-  naming exactly which mood and file - it used to fail silently and
-  ship a pack with a black wallpaper instead. If you hit this, re-pick
-  that wallpaper on the Media Review page.
 - Video thumbnails on the Media Review page are a plain icon, not an
   actual frame from the file - getting a real preview frame would mean
   adding a video-processing dependency just for that, which didn't seem
@@ -330,8 +276,6 @@ Two buttons on Page 1: **Load Existing Pack (Folder)** and **(ZIP)**.
 - Some images (webp especially) may render as a black square in
   Edgeware++. Confirmed as a known Edgeware++ bug independent of this
   tool during earlier testing - not something this tool can fix.
-- The progress bar is indeterminate (no real percentage available from
-  the compiler).
 - Pack reconstruction (loading a pack with no `plan.json`) is
   best-effort and unverified against a real compiled pack - see
   "Loading a pack" above.
