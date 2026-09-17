@@ -1,0 +1,23 @@
+{
+  "corruptionMode": true,
+  "corruptionTrigger": "Timed",
+  "corruptionTime": 240,
+  "corruptionPopups": 5,
+  "corruptionFullPerm": true,
+  "subliminalsChance": 20,
+  "audioMod": 0,
+  "buttonless": true,
+  "corruptionFadeType": "Normal",
+  "delay": 8000,
+  "vidMod": 20,
+  "webMod": 5,
+  "promptMod": 10,
+  "maxAudio": 2,
+  "maxVideos": 3,
+  "audioVolume": 70,
+  "videoVolume": 70,
+  "movingChance": 0,
+  "movingSpeed": 1,
+  "subliminalsAlpha": 25,
+  "denialChance": 0
+}
