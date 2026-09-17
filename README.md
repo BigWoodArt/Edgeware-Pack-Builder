@@ -385,6 +385,7 @@ Two buttons on Page 1: **Load Existing Pack (Folder)** and **(ZIP)**.
   pack, the warnings + the actual `info.json`/`index.json`/`media.json`/
   `corruption.json` contents are exactly what's needed to fix it - same
   as everything else in this project so far.
+  against a real compiled pack's exact JSON layout** 
 
 ## What to test / report back
 
@@ -428,3 +429,52 @@ Two buttons on Page 1: **Load Existing Pack (Folder)** and **(ZIP)**.
 - Pack reconstruction (loading a pack with no `plan.json`) is
   best-effort and unverified against a real compiled pack - see
   "Loading a pack" above.
+<<<<<<< HEAD
+=======
+
+## Version History
+
+A quick-reference changelog, oldest to newest:
+
+- **v0.1** - Initial pack builder: folder-to-pack pipeline, per-mood
+  cards (captions/notifications/subliminal/prompts/web/advanced
+  settings) in a single scrolling page, wallpaper/audio pickers,
+  Escalating Spirals/Denial, four original presets, Load Existing Pack.
+- **v0.2** - Fixed a `corruptionTrigger` typo ("Popups" instead of
+  "Popup") that silently broke popup-count-based mood cycling; added a
+  reminder that "Allow full corruption permissions" has to be turned on
+  in Edgeware itself for any per-level escalation to apply; fixed
+  reconstruction only recovering the first mood when a corruption level
+  listed several; stopped stale files from old builds surviving into
+  new ones by wiping `pack_build/`/`pack_source/media/` before every
+  compile.
+- **v0.3** - Corrected subliminal-text keys (`capPopChance` /
+  `capPopOpacity` / `capPopTimer`) that had been conflated with the
+  persistent build log file.
+- **v0.4** - Found and fixed the root cause of corruption levels not
+  triggering at all in real packs: Advanced Settings and presets could
+  produce fractional (non-integer) values, and Edgeware++'s loader
+  rejects the *entire* corruption file if even one value anywhere isn't
+  a plain int - now everything is rounded before it's written.
+- **v0.5** - All four presets replaced with new tiers (Slight Annoyance
+  / Bit of a Problem / Real Addiction / Life-Ending Slavery) covering a
+  much wider set of fields; added System Notification chance/image
+  fields and Popup Opacity; added the Pack-Wide Settings panel
+  (Corruption/Hibernate/Mitosis mode, Mitosis Strength).
+- **v0.6** - Per-Mood page redesigned around a sidebar of mood tabs with
+  cropped preview thumbnails (Pillow added as a dependency) instead of
+  one long scrolling list of collapsible cards; Advanced Settings made
+  always-visible instead of collapsed, with an auto two-column layout
+  on wide windows; loading a zip or folder now runs in the background
+  with a progress bar instead of freezing the window.
+- **v0.7** - Added Level Transition (Normal/Abrupt) and Buttonless
+  popups toggles; fixed a bug where some Advanced Settings on/off
+  toggles could stop responding to clicks.
+- **v0.8 (current)** - Added the Media Review page between
+  Whole-Experience Settings and Per-Mood: review/add/remove each mood's
+  images, videos, and audio (non-destructively), with Wallpaper moved
+  here from the Per-Mood page. Images and Videos display separately in
+  collapsible, 3-column preview grids and load lazily in the background
+  per mood, so opening the page or switching moods stays fast even on
+  packs with a lot of media.
+>>>>>>> 4c09989640ce67450463a2d1e208811e9934a79d
