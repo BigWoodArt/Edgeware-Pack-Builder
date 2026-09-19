@@ -64,7 +64,7 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
-TOOL_VERSION = "0.11"
+TOOL_VERSION = "0.12.1"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
 
 # ---------------------------------------------------------------------------
@@ -82,6 +82,16 @@ WARN_BG = "#4a2f10"
 WARN_FG = "#ffd9a0"
 TAB_ACTIVE_BG = ACCENT       # crimson - selected mood tab
 TAB_INACTIVE_BG = "#3f3f3f"  # dark gray - unselected mood tab
+
+# "Edit Pack" mode (rewriting an already-unzipped pack in place) swaps these
+# in for the normal crimson palette above, as a persistent visual reminder
+# that Save Changes writes back into the original folder rather than
+# building somewhere new. See PackBuilderApp._set_edit_mode.
+DEFAULT_ACCENT = ACCENT
+DEFAULT_ACCENT_ACTIVE = ACCENT_ACTIVE
+DEFAULT_TAB_ACTIVE_BG = TAB_ACTIVE_BG
+EDIT_MODE_ACCENT = "#5b21a8"
+EDIT_MODE_ACCENT_ACTIVE = "#7b3fd1"
 
 
 def apply_theme(root: tk.Tk):
@@ -471,6 +481,9 @@ class PackPlan:
     pack_fade_abrupt: bool = False  # False -> corruptionFadeType "Normal", True -> "Abrupt"
     pack_buttonless: bool = False   # popups closable without a specific button
     loaded_from_zip_dir: str = ""   # set if this session started from "Load Existing Pack (ZIP)"
+    loaded_from_folder: str = ""    # set if loaded from "Load Existing Pack (Folder)" - the real,
+                                     # user-chosen folder (not a temp zip-extraction copy) that
+                                     # "Save Changes to Pack" writes back into
 
     spiral_start_pct: int = 0
     spiral_end_pct: int = 100
@@ -1335,54 +1348,81 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
             if remove_list:
                 mc["remove_moods"] = [m for m in remove_list if m in mood_configs]
 
-    # Try to regroup flat media files back into per-mood buckets using
-    # media.json's own mood tags, if the shape is one we recognize.
+    # Group media by mood using index.json's own "media" list per mood -
+    # this is the reliable, already-confirmed-real structure (used the same
+    # way for the plan.json-present loading path) rather than guessing at
+    # media.json's shape, which was never actually verified against a real
+    # compiled pack and evidently doesn't match one: it was leaving every
+    # mood's media completely empty on packs with no plan.json, silently.
     grouped_any = False
-    if isinstance(media, dict):
-        entries = media.items() if all(isinstance(v, dict) for v in media.values()) else []
-        for filename, meta in entries:
-            file_moods = meta.get("moods") or meta.get("mood") or []
-            if isinstance(file_moods, str):
-                file_moods = [file_moods]
+    for mood_entry in index.get("moods", []) if isinstance(index, dict) else []:
+        mood_name = mood_entry.get("mood")
+        if mood_name not in mood_configs:
+            continue
+        for filename in mood_entry.get("media", []):
             file_path = None
             for subfolder in ("img", "aud", "vid"):
                 candidate = root / subfolder / filename
                 if candidate.is_file():
                     file_path = candidate
                     break
-            if not file_path:
-                continue
-            for m in file_moods:
-                if m in mood_configs:
-                    mood_configs[m].setdefault("media_files", [])
-                    mood_configs[m]["media_files"].append(str(file_path))
-                    grouped_any = True
-    elif isinstance(media, list):
-        for entry in media:
-            filename = entry.get("file") or entry.get("path")
-            file_moods = entry.get("moods") or entry.get("mood") or []
-            if isinstance(file_moods, str):
-                file_moods = [file_moods]
-            if not filename:
-                continue
-            file_path = None
-            for subfolder in ("img", "aud", "vid"):
-                candidate = root / subfolder / Path(filename).name
-                if candidate.is_file():
-                    file_path = candidate
-                    break
-            if not file_path:
-                continue
-            for m in file_moods:
-                if m in mood_configs:
-                    mood_configs[m].setdefault("media_files", [])
-                    mood_configs[m]["media_files"].append(str(file_path))
-                    grouped_any = True
+            if file_path is not None:
+                mood_configs[mood_name].setdefault("media_files", [])
+                mood_configs[mood_name]["media_files"].append(str(file_path))
+                grouped_any = True
+            else:
+                warnings.append(f"'{mood_name}' media: '{filename}' is listed in index.json "
+                                 f"but isn't in img/aud/vid - it may have been removed from the pack.")
+
+    # media.json fallback, only if index.json didn't have moods/media at all
+    # (an unusually old or hand-built pack) - unverified shape, kept only as
+    # a last resort rather than the primary method.
+    if not grouped_any:
+        if isinstance(media, dict):
+            entries = media.items() if all(isinstance(v, dict) for v in media.values()) else []
+            for filename, meta in entries:
+                file_moods = meta.get("moods") or meta.get("mood") or []
+                if isinstance(file_moods, str):
+                    file_moods = [file_moods]
+                file_path = None
+                for subfolder in ("img", "aud", "vid"):
+                    candidate = root / subfolder / filename
+                    if candidate.is_file():
+                        file_path = candidate
+                        break
+                if not file_path:
+                    continue
+                for m in file_moods:
+                    if m in mood_configs:
+                        mood_configs[m].setdefault("media_files", [])
+                        mood_configs[m]["media_files"].append(str(file_path))
+                        grouped_any = True
+        elif isinstance(media, list):
+            for entry in media:
+                filename = entry.get("file") or entry.get("path")
+                file_moods = entry.get("moods") or entry.get("mood") or []
+                if isinstance(file_moods, str):
+                    file_moods = [file_moods]
+                if not filename:
+                    continue
+                file_path = None
+                for subfolder in ("img", "aud", "vid"):
+                    candidate = root / subfolder / Path(filename).name
+                    if candidate.is_file():
+                        file_path = candidate
+                        break
+                if not file_path:
+                    continue
+                for m in file_moods:
+                    if m in mood_configs:
+                        mood_configs[m].setdefault("media_files", [])
+                        mood_configs[m]["media_files"].append(str(file_path))
+                        grouped_any = True
 
     if not grouped_any:
         warnings.append(
-            "Couldn't confidently regroup media files by mood from media.json - "
-            "you'll need to point each mood at its images again before rebuilding "
+            "Couldn't find any per-mood media grouping in this pack (checked index.json and "
+            "media.json) - you'll need to point each mood at its images again before rebuilding "
             "(everything else - captions, corruption levels, settings - carried over)."
         )
 
@@ -1485,7 +1525,32 @@ class PackBuilderApp:
             self.pack_tool_var.set(self.plan.pack_tool_dir)
             self.pack_tool_note_var.set("(remembered from last time)")
 
+        self.edit_mode = False
         self._build_step1()
+
+    def _set_edit_mode(self, on: bool):
+        """Swap the whole app's accent color between the normal crimson and
+        a purple "Edit Pack" palette - a persistent visual reminder, on
+        every page, that Save Changes writes back into the original folder
+        rather than building somewhere new. Global reassignment works here
+        because every place that reads ACCENT/TAB_ACTIVE_BG/etc. (ttk style
+        setup, ToggleSwitch, the sidebar tab coloring) does so at the point
+        each widget is actually created or redrawn, not once at import
+        time - so changing the globals and re-running apply_theme() plus a
+        fresh page build is enough to re-skin everything already on screen
+        too, not just whatever gets built after this point.
+        """
+        global ACCENT, ACCENT_ACTIVE, TAB_ACTIVE_BG
+        self.edit_mode = on
+        if on:
+            ACCENT = EDIT_MODE_ACCENT
+            ACCENT_ACTIVE = EDIT_MODE_ACCENT_ACTIVE
+            TAB_ACTIVE_BG = EDIT_MODE_ACCENT
+        else:
+            ACCENT = DEFAULT_ACCENT
+            ACCENT_ACTIVE = DEFAULT_ACCENT_ACTIVE
+            TAB_ACTIVE_BG = DEFAULT_TAB_ACTIVE_BG
+        apply_theme(self.root)
 
     # -- Step 1 -----------------------------------------------------------------
 
@@ -1649,6 +1714,13 @@ class PackBuilderApp:
             return
         self.source_var.set(chosen)
         self.plan.source_dir = chosen
+        # Picking a fresh source folder means "build something new," even if
+        # the current plan happened to be loaded from an existing pack
+        # moments ago - Edit Pack mode (and Save-Changes-in-place) only
+        # makes sense while still working with that original loaded folder.
+        self.plan.loaded_from_folder = ""
+        if self.edit_mode:
+            self._set_edit_mode(False)
 
         self._start_loading("Scanning folder...")
         result = {"names": None, "error": None}
@@ -1713,7 +1785,7 @@ class PackBuilderApp:
     def _load_from_folder(self):
         chosen = filedialog.askdirectory(title="Select a pack folder to load")
         if chosen:
-            self._load_pack(Path(chosen))
+            self._load_pack(Path(chosen), source_folder_dir=str(Path(chosen)))
 
     def _load_from_zip(self):
         chosen = filedialog.askopenfilename(title="Select a pack .zip to load", filetypes=[("Zip files", "*.zip")])
@@ -1764,7 +1836,7 @@ class PackBuilderApp:
             return
         self._load_pack(result["extract_dir"], source_zip_dir=str(result["extract_dir"]))
 
-    def _load_pack(self, folder: Path, source_zip_dir: str = ""):
+    def _load_pack(self, folder: Path, source_zip_dir: str = "", source_folder_dir: str = ""):
         plan_json_path = find_plan_json(folder)
         self.reconstructed_warnings = []
 
@@ -1792,6 +1864,8 @@ class PackBuilderApp:
             self.reconstructed_warnings = warnings
 
         self.plan.loaded_from_zip_dir = source_zip_dir
+        self.plan.loaded_from_folder = source_folder_dir
+        self._set_edit_mode(bool(source_folder_dir))
         self._apply_loaded_plan()
         messagebox.showinfo(
             "Pack loaded",
@@ -2665,7 +2739,10 @@ class PackBuilderApp:
         btn_row = ttk.Frame(bottom_bar)
         btn_row.pack(fill="x")
         ttk.Button(btn_row, text="Back", command=self._go_back_to_media_from_step3).pack(side="left")
-        self.build_btn = ttk.Button(btn_row, text="Build Pack", command=self._collect_and_build)
+        if self.plan.loaded_from_folder:
+            self.build_btn = ttk.Button(btn_row, text="Save Changes to Pack", command=self._save_changes_to_pack)
+        else:
+            self.build_btn = ttk.Button(btn_row, text="Build Pack", command=self._collect_and_build)
         self.build_btn.pack(side="right")
 
         header = ttk.Frame(root_frame, padding=(20, 15, 20, 5))
@@ -3107,7 +3184,11 @@ class PackBuilderApp:
         # safe enough for this simple polling setup) rather than any widget.
         self.status_var.set(msg)
 
-    def _collect_and_build(self):
+    def _validate_before_build(self) -> bool:
+        """Shared by both Build Pack and Save Changes to Pack. Syncs pages
+        into self.plan and checks for the same two things that would make
+        either one fail or produce a broken pack. Shows its own warning
+        dialogs; returns False if the caller should stop."""
         self._sync_step2_into_plan()
         parse_errors = self._sync_moods_into_plan(strict=True)
 
@@ -3116,7 +3197,7 @@ class PackBuilderApp:
                 "Some Advanced Settings values aren't numbers",
                 "Please fix these (or clear them):\n\n" + "\n".join(parse_errors)
             )
-            return
+            return False
 
         missing = [n for n, mc in self.plan.mood_configs.items() if mc["wallpaper_change"] and not mc["wallpaper_path"]]
         if missing:
@@ -3125,6 +3206,12 @@ class PackBuilderApp:
                 f"These moods have 'Wallpaper' checked but no image chosen: {', '.join(missing)}\n"
                 f"Pick an image or uncheck them before building."
             )
+            return False
+
+        return True
+
+    def _collect_and_build(self):
+        if not self._validate_before_build():
             return
 
         project_dir = filedialog.askdirectory(title="Choose (or create) ONE folder to build this pack in")
@@ -3298,6 +3385,124 @@ class PackBuilderApp:
                     failed.append(f"{p} ({e})")
             if failed:
                 messagebox.showwarning("Some files couldn't be deleted", "\n".join(failed))
+
+    def _save_changes_to_pack(self):
+        """Rewrite an already-unzipped, already-loaded pack in place. Never
+        touches the original folder until a full compile has already
+        succeeded somewhere else - the original is moved aside as a backup
+        (not deleted) only at the very last step, once the replacement is
+        known-good and ready to swap in."""
+        if not self._validate_before_build():
+            return
+
+        if not self.plan.pack_tool_dir:
+            messagebox.showwarning(
+                "No Pack Tool folder set",
+                "Save Changes to Pack needs to actually recompile the pack, which needs a Pack "
+                "Tool folder - set one on the first page before saving."
+            )
+            return
+
+        original_folder = Path(self.plan.loaded_from_folder)
+        if not original_folder.is_dir():
+            messagebox.showerror(
+                "Original folder not found",
+                f"The pack's original folder doesn't exist anymore:\n{original_folder}"
+            )
+            return
+
+        # Staging lives as a sibling of the original folder (same drive),
+        # not the system temp directory - the final swap-in is a same-
+        # volume rename either way, which is as close to atomic as this
+        # can get and avoids a slow, more failure-prone cross-drive copy.
+        staging_root = original_folder.parent / f".{original_folder.name}_rewrite_staging"
+        staging_source = staging_root / "pack_source"
+        staging_build = staging_root / "pack_build"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_folder = original_folder.parent / f"{original_folder.name}_backup_{timestamp}"
+
+        self.build_btn.config(state="disabled")
+        self.progress.pack(fill="x", pady=(4, 2))
+        self.status_label.pack(anchor="w", pady=(0, 8))
+        self.progress.start(12)
+        self.status_var.set("Starting...")
+
+        self._save_result = {"done": False, "error": None, "saved": False,
+                              "backup_folder": None, "warn_stdout": ""}
+
+        def worker():
+            try:
+                if staging_root.exists():
+                    shutil.rmtree(staging_root)
+                write_pack_source(self.plan, staging_source, status_cb=self._set_status)
+
+                _, stdout, stderr = compile_with_pack_tool(
+                    Path(self.plan.pack_tool_dir), staging_source, staging_build,
+                    self.plan.compress_images, self.plan.compress_videos, self.plan.rename_media,
+                    status_cb=self._set_status
+                )
+                self._save_result["warn_stdout"] = stdout or ""
+
+                # A real compile failure raises before this point (caught
+                # below) - but also sanity-check the two files every pack
+                # needs before trusting this enough to overwrite anything.
+                if not (staging_build / "corruption.json").is_file() or not (staging_build / "index.json").is_file():
+                    raise RuntimeError(
+                        "The compiler finished without producing corruption.json/index.json - "
+                        "something went wrong. Your original pack hasn't been touched.\n\n"
+                        f"Compiler output:\n{stdout}\n{stderr}"
+                    )
+
+                plan_json_src = staging_source / "plan.json"
+                if plan_json_src.is_file():
+                    shutil.copy2(plan_json_src, staging_build / "plan.json")
+
+                self._set_status("Swapping in the new version...")
+                shutil.move(str(original_folder), str(backup_folder))
+                shutil.move(str(staging_build), str(original_folder))
+                self._save_result["backup_folder"] = backup_folder
+                self._save_result["saved"] = True
+
+                shutil.rmtree(staging_root, ignore_errors=True)
+            except Exception as e:
+                self._save_result["error"] = str(e)
+            finally:
+                self._save_result["done"] = True
+
+        self._build_thread = threading.Thread(target=worker, daemon=True)
+        self._build_thread.start()
+        self.root.after(150, self._poll_save_changes)
+
+    def _poll_save_changes(self):
+        if not self._save_result.get("done"):
+            self.root.after(150, self._poll_save_changes)
+            return
+
+        if not self.progress.winfo_exists():
+            return
+
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.status_label.pack_forget()
+        self.build_btn.config(state="normal")
+
+        err = self._save_result.get("error")
+        if err:
+            messagebox.showerror("Save failed - original pack untouched", err)
+            return
+
+        backup_folder = self._save_result.get("backup_folder")
+        stdout = self._save_result.get("warn_stdout", "")
+        warn_note = ""
+        if stdout and ("WARNING" in stdout or "ERROR" in stdout):
+            warn_note = "\n\nNote: the compiler logged some warnings - worth a skim if anything looks off in-game."
+        messagebox.showinfo(
+            "Changes saved",
+            f"Rewrote the pack in place:\n{self.plan.loaded_from_folder}\n\n"
+            f"Your original files were moved here, not deleted, in case anything looks wrong:\n"
+            f"{backup_folder}\n\n"
+            f"Safe to delete that backup once you've confirmed everything works.{warn_note}"
+        )
 
 
 def main():
