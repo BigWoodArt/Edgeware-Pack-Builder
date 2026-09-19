@@ -64,7 +64,7 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
-TOOL_VERSION = "0.12.1"
+TOOL_VERSION = "0.12.2"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1302,14 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
         if not name:
             continue
         mood_names.append(name)
+        # index.json's per-mood "web" is normally [{"url": ..., "args": [...]}],
+        # but a pack from a different source (or an older/other-tool
+        # convention) can have it as plain URL strings instead - normalize
+        # here, once, so every place downstream that expects dicts (Per-Mood's
+        # web text box in particular) can't get handed something else and
+        # crash the whole page build partway through.
+        raw_web = entry.get("web", [])
+        normalized_web = [{"url": w, "args": []} if isinstance(w, str) else w for w in raw_web]
         mood_configs[name] = asdict(MoodConfig(
             name=name,
             captions=entry.get("captions", []),
@@ -1309,7 +1317,7 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
             subliminal_messages=entry.get("subliminal-messages", []),
             prompts=entry.get("prompts", []),
             denial_captions=entry.get("denial", []),
-            web_entries=entry.get("web", []),
+            web_entries=normalized_web,
         ))
     plan.moods = mood_names
 
@@ -2795,7 +2803,26 @@ class PackBuilderApp:
         self._tab_photo_refs = {}
         for i, name in enumerate(self.mood_names):
             card_holder = ttk.Frame(main_scroll.inner)
-            self._build_mood_card(card_holder, name, mood_index=i)
+            try:
+                self._build_mood_card(card_holder, name, mood_index=i)
+            except Exception as e:
+                # One mood's malformed data used to crash this whole loop,
+                # leaving every mood after it (and page 3 as a whole) in a
+                # half-built, broken state - a placeholder here instead
+                # means the rest of the pack is still usable, and this one
+                # mood's problem is visible instead of silently corrupting
+                # everything else.
+                for w in card_holder.winfo_children():
+                    w.destroy()
+                err_frame = ttk.LabelFrame(card_holder, text=f"{name} - couldn't load", padding=10)
+                err_frame.pack(fill="both", expand=True)
+                ttk.Label(err_frame, text=f"{type(e).__name__}: {e}", style="Muted.TLabel",
+                          wraplength=600, justify="left").pack(anchor="w")
+                self.mood_widgets[name] = {
+                    "captions_text": None, "notif_text": None, "subliminal_text": None,
+                    "prompts_text": None, "denial_text": None, "web_text": None,
+                    "advanced_vars": {}, "remove_vars": {},
+                }
             self.mood_card_frames[name] = card_holder
 
         self.mood_tab_widgets = {}
@@ -2983,6 +3010,16 @@ class PackBuilderApp:
         if existing.get("web_entries"):
             web_lines = []
             for w in existing["web_entries"]:
+                # w is normally a {"url": ..., "args": [...]} dict, but a
+                # pack from a different source (or an older/other-tool
+                # convention) can have plain URL strings here instead - this
+                # used to crash the ENTIRE Page 3 build loop on w.get(...)
+                # the moment any mood hit that shape, leaving every mood
+                # after it (and this one) never actually built, which is
+                # what "all pictures broke" after this was actually seeing.
+                if isinstance(w, str):
+                    web_lines.append(w)
+                    continue
                 line = w.get("url", "")
                 if w.get("args"):
                     line += " | " + ", ".join(w["args"])
@@ -3112,6 +3149,11 @@ class PackBuilderApp:
 
     @staticmethod
     def _lines(text_widget: tk.Text) -> list:
+        if text_widget is None:
+            # A mood whose card failed to build (see _build_step3's
+            # try/except) has no real widgets - treat it as empty rather
+            # than crash the sync step too.
+            return []
         raw = text_widget.get("1.0", "end")
         return [line.strip() for line in raw.splitlines() if line.strip()]
 
