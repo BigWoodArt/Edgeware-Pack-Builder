@@ -37,11 +37,14 @@ takes.
 
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import urllib.request
+import webbrowser
 import zipfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -64,8 +67,45 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
-TOOL_VERSION = "0.15"
+ICON_PATH = SCRIPT_DIR / "icon.png"
+ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
+TOOL_VERSION = "0.17.2"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
+REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
+REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
+
+
+def _version_tuple(v: str) -> tuple:
+    return tuple(int(p) for p in v.split("."))
+
+
+def check_for_newer_version(current_version: str, timeout: int = 4):
+    """Returns the newer version string found in the repo's own README (its
+    Version History section, same "vX.Y.Z (current)" line this project's
+    own README keeps updated) if the one on GitHub is newer than what's
+    running, else None. Never raises - reads the repo's README rather than
+    GitHub's release/tag API, since releases here use a rolling tag name
+    rather than one per version, so the README is the one place that
+    reliably says what the actual latest version is. A stale/behind repo
+    (not pushed recently) just means this reports nothing, same as being
+    genuinely up to date - it only ever acts when the repo is AHEAD."""
+    try:
+        with urllib.request.urlopen(REPO_README_RAW_URL, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    match = re.search(r"\*\*v([\d.]+)\s*\(current\)\*\*", text)
+    if not match:
+        return None
+    remote_version = match.group(1)
+
+    try:
+        if _version_tuple(remote_version) > _version_tuple(current_version):
+            return remote_version
+    except ValueError:
+        return None
+    return None
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -480,6 +520,8 @@ class PackPlan:
     pack_mitosis_strength: int = 2  # Edgeware's own range: 2-10
     pack_fade_abrupt: bool = False  # False -> corruptionFadeType "Normal", True -> "Abrupt"
     pack_buttonless: bool = False   # popups closable without a specific button
+    pack_button_text: str = ""      # index.default["popup-close"] - real default: "I Submit <3"
+    pack_discord_status: str = ""   # discord.dat's content - shown as Discord Rich Presence text
     loaded_from_zip_dir: str = ""   # set if this session started from "Load Existing Pack (ZIP)"
     loaded_from_folder: str = ""    # set if loaded from "Load Existing Pack (Folder)" - the real,
                                      # user-chosen folder (not a temp zip-extraction copy) that
@@ -504,6 +546,28 @@ def scan_moods(root: Path) -> list:
     if not root.is_dir():
         return []
     return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
+def project_media_missing(plan) -> bool:
+    """True if a loaded .epbproj project's media appears to be entirely
+    gone - e.g. it was exported, then the working temp files were deleted,
+    then the project file itself got reopened later. Only reports missing
+    when there was actually media to lose, and only when NONE of it can be
+    found - a project that genuinely never had media yet isn't "missing"
+    anything, and one where the source folder is just fine shouldn't warn
+    about anything either."""
+    if plan.source_dir and Path(plan.source_dir).is_dir():
+        return False
+
+    referenced_any = False
+    for mc in plan.mood_configs.values():
+        for path_str in (mc.get("media_files") or []):
+            referenced_any = True
+            if Path(path_str).is_file():
+                return False
+    if referenced_any:
+        return True
+    return bool(plan.source_dir)
 
 
 def looks_like_compiled_pack(folder: Path) -> bool:
@@ -820,6 +884,10 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
     if corruption_levels:
         base_raw.update(corruption_levels[0].get("config", {}))
 
+    default_section = {}
+    if plan.pack_button_text:
+        default_section["popup-close"] = plan.pack_button_text
+
     return {
         "info": {
             "generate": True,
@@ -830,12 +898,12 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
             "description": plan.pack_description or plan.pack_name,
         },
         "discord": {
-            "generate": False,
-            "status": "",
+            "generate": bool(plan.pack_discord_status),
+            "status": plan.pack_discord_status,
         },
         "index": {
             "generate": True,
-            "default": {},
+            "default": default_section,
             "moods": mood_entries,
         },
         "config": {
@@ -851,7 +919,19 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
 
 def _dump_yaml(doc: dict) -> str:
     if HAVE_YAML:
-        return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        # allow_unicode=False (the default) forces anything outside plain
+        # ASCII - curly quotes, ellipses, any non-English character - into
+        # YAML's own \uXXXX escape notation instead of raw UTF-8 bytes.
+        # Confirmed root cause of real text corruption: the actual Pack
+        # Tool compiler's main.py opens pack.yml with open(path, "r") and
+        # no encoding= at all, which silently misreads UTF-8 as the
+        # system's default codepage (cp1252 on many Windows machines) -
+        # e.g. "won't" (curly apostrophe) becomes "won\u00e2\u20ac\u2122t".
+        # That's third-party code this project can't patch, but a file
+        # containing nothing but plain ASCII bytes can't be misread by ANY
+        # codepage in the first place - confirmed by writing this way and
+        # then deliberately re-reading the result with the wrong codec.
+        return yaml.safe_dump(doc, sort_keys=False, allow_unicode=False)
 
     lines = []
 
@@ -1056,6 +1136,87 @@ def find_python_launcher() -> str:
         if shutil.which(candidate):
             return candidate
     return sys.executable
+
+
+def verify_compiled_media(plan, build_dir: Path) -> list:
+    """Check that every file referenced in each mood's media_files actually
+    made it into the compiled build, in the folder matching its real type -
+    and actively fix it in place when it didn't. Catches a real, confirmed
+    upstream ambiguity: some audio files (M4A in particular) share their
+    container format with MP4 video, and the real compiler's file-type
+    detection checks video before audio - a real-world M4A encoding can
+    match both checks and silently land in vid/ instead of aud/. index.json/
+    media.json only ever reference a file by its bare filename, never by
+    which of img/aud/vid it's actually sitting in, so moving the physical
+    file to the right folder afterward is safe and transparent - Edgeware
+    just finds it in the folder it's actually looking in for that type.
+    Returns a short list of what got auto-corrected (kept minimal - fixed
+    is fixed, not something the user needs to do anything about) plus
+    anything that couldn't be resolved at all (genuinely missing).
+    """
+    problems = []
+    if not build_dir.is_dir():
+        return problems
+
+    present_by_folder = {}
+    for subfolder in ("img", "aud", "vid"):
+        d = build_dir / subfolder
+        present_by_folder[subfolder] = {p.name for p in d.iterdir() if p.is_file()} if d.is_dir() else set()
+    all_present = present_by_folder["img"] | present_by_folder["aud"] | present_by_folder["vid"]
+    expected_folder_for = {"image": "img", "audio": "aud", "video": "vid"}
+
+    for mood_name, mc in plan.mood_configs.items():
+        for path_str in (mc.get("media_files") or []):
+            name = Path(path_str).name
+            expected_kind = classify_media_file(Path(path_str))
+            expected_folder = expected_folder_for.get(expected_kind)
+
+            if name not in all_present:
+                problems.append(
+                    f"'{mood_name}': '{name}' isn't in the compiled pack at all - the compiler's "
+                    f"file-type check didn't recognize it as an image, video, or audio file."
+                )
+            elif expected_folder and name not in present_by_folder[expected_folder]:
+                actual_folder = next((f for f, names in present_by_folder.items() if name in names), None)
+                if actual_folder is None:
+                    continue
+                src = build_dir / actual_folder / name
+                dst = build_dir / expected_folder / name
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dst))
+                    present_by_folder[actual_folder].discard(name)
+                    present_by_folder[expected_folder].add(name)
+                    problems.append(
+                        f"'{mood_name}': '{name}' had been misclassified as {actual_folder}/ by the "
+                        f"compiler (a known ambiguity, M4A audio especially) - moved to {expected_folder}/."
+                    )
+                except OSError as e:
+                    problems.append(
+                        f"'{mood_name}': '{name}' landed in {actual_folder}/ instead of {expected_folder}/ "
+                        f"and couldn't be moved automatically ({e}) - you'll need to move it by hand."
+                    )
+    return problems
+
+
+def stdout_has_real_warnings(stdout: str, plan) -> bool:
+    """Whether the compiler's output has anything actually worth flagging
+    in the success dialog - filters out one specific, guaranteed-harmless
+    line first: the real compiler unconditionally warns "No default
+    wallpaper.png found" any time no wallpaper file happens to be literally
+    named wallpaper.png, even when no default wallpaper was ever set and
+    per-mood wallpapers are working correctly. Confirmed straight from the
+    compiler's own copy_wallpapers() - it has no way to know the absence
+    was intentional. The raw log file still gets the full, unfiltered
+    output either way - this only affects whether the success dialog
+    nudges the user to go check it."""
+    if not stdout:
+        return False
+    lines = stdout.splitlines()
+    if not plan.default_wallpaper_path:
+        lines = [ln for ln in lines if "No default wallpaper.png found" not in ln]
+    filtered = "\n".join(lines)
+    return "WARNING" in filtered or "ERROR" in filtered
 
 
 def compile_with_pack_tool(pack_tool_dir: Path, source_pack_dir: Path, build_dir: Path,
@@ -1313,6 +1474,13 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
     plan.pack_mitosis_strength = config.get("mitosisStrength") or plan.pack_mitosis_strength
     plan.pack_fade_abrupt = config.get("corruptionFadeType") == "Abrupt"
     plan.pack_buttonless = bool(config.get("buttonless", plan.pack_buttonless))
+    plan.pack_button_text = (index.get("default") or {}).get("popupClose", "") or plan.pack_button_text
+    discord_dat = root / "discord.dat"
+    if discord_dat.is_file():
+        try:
+            plan.pack_discord_status = discord_dat.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
 
     moods_list = index.get("moods", [])
     mood_names = []
@@ -1580,7 +1748,9 @@ class PackBuilderApp:
         self.root = root
         self.root.title(f"Edgeware++ Advanced Pack Builder v{TOOL_VERSION}")
         self.root.geometry("820x800")
+        self._set_window_icon()
         apply_theme(self.root)
+        self._build_menu_bar()
 
         self.plan = PackPlan()
         self.settings = load_settings()
@@ -1620,6 +1790,8 @@ class PackBuilderApp:
         self.pack_mitosis_strength_var = IntVar(value=self.plan.pack_mitosis_strength)
         self.pack_fade_var = IntVar(value=1 if self.plan.pack_fade_abrupt else 0)
         self.pack_buttonless_var = IntVar(value=1 if self.plan.pack_buttonless else 0)
+        self.pack_button_text_var = StringVar(value=self.plan.pack_button_text)
+        self.pack_discord_status_var = StringVar(value=self.plan.pack_discord_status)
 
         self.compress_images_var = BooleanVar(value=False)
         self.compress_videos_var = BooleanVar(value=False)
@@ -1653,6 +1825,26 @@ class PackBuilderApp:
 
         self.edit_mode = False
         self._build_step1()
+        self.root.after(800, self._check_for_update_in_background)
+
+    def _check_for_update_in_background(self):
+        # Runs once, shortly after the window first appears - never blocks
+        # startup itself, and a failed/slow network check just means
+        # nothing happens (see check_for_newer_version's own error handling).
+        def worker():
+            newer = check_for_newer_version(TOOL_VERSION)
+            if newer:
+                self.root.after(0, lambda: self._offer_update(newer))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _offer_update(self, newer_version: str):
+        if messagebox.askyesno(
+            "Update available",
+            f"A newer version is available on GitHub: v{newer_version} (you have v{TOOL_VERSION}).\n\n"
+            f"Open the GitHub page to download it?"
+        ):
+            webbrowser.open(REPO_URL)
 
     def _set_edit_mode(self, on: bool):
         """Swap the whole app's accent color between the normal crimson and
@@ -1678,11 +1870,134 @@ class PackBuilderApp:
             TAB_ACTIVE_BG = DEFAULT_TAB_ACTIVE_BG
         apply_theme(self.root)
 
+    # -- File menu ----------------------------------------------------------
+
+    def _set_window_icon(self):
+        # Windows' TASKBAR icon (the one at the bottom of the screen) is a
+        # different thing from the window's own title-bar icon - it's set
+        # through the native win32 icon mechanism, which Tk only actually
+        # drives via iconbitmap() with a real multi-resolution .ico file,
+        # not iconphoto() with a PhotoImage. iconphoto() alone DOES set the
+        # window's own corner icon correctly (confirmed working already),
+        # it just never reaches the taskbar specifically on Windows - a
+        # known Tk/Windows gap, not something wrong with the PNG itself.
+        # Both calls kept: iconbitmap for the Windows taskbar, iconphoto as
+        # the cross-platform fallback (macOS/Linux don't use .ico at all).
+        if ICON_ICO_PATH.is_file():
+            try:
+                self.root.iconbitmap(default=str(ICON_ICO_PATH))
+            except Exception:
+                pass
+        if not ICON_PATH.is_file() or not HAVE_PIL:
+            return
+        try:
+            img = Image.open(ICON_PATH).convert("RGBA")
+            self._window_icon_img = ImageTk.PhotoImage(img)
+            self.root.iconphoto(True, self._window_icon_img)
+        except Exception:
+            pass  # a missing/bad icon should never stop the app from starting
+
+    def _build_menu_bar(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="New Window", command=self._new_window)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save Project...", command=self._save_project)
+        file_menu.add_command(label="Open Project...", command=self._load_project)
+        file_menu.add_separator()
+        file_menu.add_command(label="Quit", command=self.root.destroy)
+        menubar.add_cascade(label="File", menu=file_menu)
+        self.root.config(menu=menubar)
+        self.menubar = menubar
+        self.file_menu = file_menu
+
+    def _new_window(self):
+        # A genuinely separate process/window rather than trying to reset
+        # this one's state in place - simplest way to guarantee the new
+        # window starts completely clean regardless of how deep into a pack
+        # the current window is.
+        try:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
+        except Exception as e:
+            messagebox.showerror("Couldn't open a new window", str(e))
+
+    def _sync_everything_possible(self):
+        """Best-effort sync of whatever page is currently on screen into
+        self.plan before saving a project or checking for updates - each
+        _sync_* method only touches widgets that actually exist, so this is
+        safe to call regardless of which of the four pages is active.
+        _sync_moods_into_plan REPLACES self.plan.mood_configs wholesale
+        with whatever it collects from self.mood_widgets - only call it
+        when that's actually been populated (Page 3 built at least once
+        this session), or it would wipe out perfectly good existing mood
+        data with an empty dict just because that page was never visited.
+        """
+        try:
+            self._sync_step2_into_plan()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "mood_widgets", None):
+                self._sync_moods_into_plan(strict=False)
+        except Exception:
+            pass
+
+    def _save_project(self):
+        self._sync_everything_possible()
+        path = filedialog.asksaveasfilename(
+            title="Save Pack Builder Project",
+            defaultextension=".epbproj",
+            filetypes=[("Edgeware Pack Builder Project", "*.epbproj")],
+        )
+        if not path:
+            return
+        try:
+            # Unlike the sanitized plan.json that ships inside a built pack,
+            # a project file never leaves this machine - no reason to strip
+            # local paths here, and doing so would defeat the whole point
+            # of being able to pick up a half-finished build later.
+            Path(path).write_text(json.dumps(asdict(self.plan), indent=2), encoding="utf-8")
+            messagebox.showinfo("Saved", f"Project saved to:\n{path}")
+        except OSError as e:
+            messagebox.showerror("Couldn't save project", str(e))
+
+    def _load_project(self):
+        path = filedialog.askopenfilename(
+            title="Open Pack Builder Project",
+            filetypes=[("Edgeware Pack Builder Project", "*.epbproj"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            known_fields = {f for f in PackPlan.__dataclass_fields__}
+            filtered = {k: v for k, v in data.items() if k in known_fields}
+            loaded_plan = PackPlan(**filtered)
+        except Exception as e:
+            messagebox.showerror("Couldn't open project", str(e))
+            return
+
+        if project_media_missing(loaded_plan):
+            if not messagebox.askyesno(
+                "Media files not found",
+                "Temp files for this project were deleted. This will load settings and "
+                "captions, but no media. Continue?"
+            ):
+                return
+
+        self.plan = loaded_plan
+        self.mood_names = list(self.plan.moods)
+        self.reconstructed_warnings = []
+        self._set_edit_mode(bool(self.plan.loaded_from_folder))
+        self._apply_loaded_plan()
+        self._build_step1()
+
     # -- Step 1 -----------------------------------------------------------------
 
     def _build_step1(self):
         for w in self.root.winfo_children():
             w.destroy()
+            self._build_menu_bar()  # winfo_children() teardown above also destroys the menu bar
 
         root_frame = ttk.Frame(self.root)
         root_frame.pack(fill="both", expand=True)
@@ -2072,6 +2387,8 @@ class PackBuilderApp:
         self.pack_mitosis_strength_var.set(self.plan.pack_mitosis_strength)
         self.pack_fade_var.set(1 if self.plan.pack_fade_abrupt else 0)
         self.pack_buttonless_var.set(1 if self.plan.pack_buttonless else 0)
+        self.pack_button_text_var.set(self.plan.pack_button_text)
+        self.pack_discord_status_var.set(self.plan.pack_discord_status)
 
         self.compress_images_var.set(self.plan.compress_images)
         self.compress_videos_var.set(self.plan.compress_videos)
@@ -2120,6 +2437,7 @@ class PackBuilderApp:
     def _build_step2(self):
         for w in self.root.winfo_children():
             w.destroy()
+            self._build_menu_bar()  # winfo_children() teardown above also destroys the menu bar
 
         root_frame = ttk.Frame(self.root)
         root_frame.pack(fill="both", expand=True)
@@ -2268,6 +2586,15 @@ class PackBuilderApp:
         tip(buttonless_toggle, "When ON, popups can be closed by clicking anywhere on them instead of "
                                 "needing to hit a specific close button.")
 
+        button_text_row = ttk.Frame(packwide_frame)
+        button_text_row.pack(fill="x", pady=2)
+        ttk.Label(button_text_row, text="Button text", width=24).pack(side="left")
+        button_text_entry = ttk.Entry(button_text_row, textvariable=self.pack_button_text_var, width=30)
+        button_text_entry.pack(side="left")
+        tip(button_text_entry, "Text shown on the popup close button, when Buttonless is OFF. Leave "
+                                "blank to keep Edgeware's own default (\"I Submit <3\"). This is a "
+                                "whole-pack setting - Edgeware doesn't support this varying per mood.")
+
         spiral_frame = ttk.LabelFrame(frm, text="Escalating Spirals (subliminal overlay chance)", padding=10)
         spiral_frame.pack(fill="x", pady=5)
         pct_row = ttk.Frame(spiral_frame)
@@ -2342,6 +2669,16 @@ class PackBuilderApp:
         splash_clear = ttk.Button(splash_row, text="Clear", command=self._clear_loading_splash)
         splash_clear.pack(side="left", padx=(8, 0))
         tip(splash_clear, TOOLTIPS["loading_splash_clear"])
+
+        discord_row = ttk.Frame(extras_frame)
+        discord_row.pack(fill="x", pady=2)
+        ttk.Label(discord_row, text="Discord status:", width=20).pack(side="left")
+        discord_entry = ttk.Entry(discord_row, textvariable=self.pack_discord_status_var, width=40)
+        discord_entry.pack(side="left")
+        tip(discord_entry, "Shown as the Discord Rich Presence status text while the pack runs, if the "
+                            "user has Edgeware's own 'Show on Discord' setting turned on (off by "
+                            "default - it's flagged in Edgeware itself as something that could out "
+                            "someone to their friends list). Leave blank to skip generating this at all.")
 
         if self.plan.pack_tool_dir:
             build_opts = ttk.LabelFrame(frm, text="Build Options (Pack Tool compiler)", padding=10)
@@ -2425,6 +2762,8 @@ class PackBuilderApp:
         self.plan.pack_mitosis_strength = self.pack_mitosis_strength_var.get()
         self.plan.pack_fade_abrupt = bool(self.pack_fade_var.get())
         self.plan.pack_buttonless = bool(self.pack_buttonless_var.get())
+        self.plan.pack_button_text = self.pack_button_text_var.get().strip()
+        self.plan.pack_discord_status = self.pack_discord_status_var.get().strip()
 
         self.plan.compress_images = self.compress_images_var.get()
         self.plan.compress_videos = self.compress_videos_var.get()
@@ -2500,6 +2839,7 @@ class PackBuilderApp:
     def _build_step_media(self):
         for w in self.root.winfo_children():
             w.destroy()
+            self._build_menu_bar()  # winfo_children() teardown above also destroys the menu bar
 
         root_frame = ttk.Frame(self.root)
         root_frame.pack(fill="both", expand=True)
@@ -2896,6 +3236,7 @@ class PackBuilderApp:
     def _build_step3(self):
         for w in self.root.winfo_children():
             w.destroy()
+            self._build_menu_bar()  # winfo_children() teardown above also destroys the menu bar
 
         root_frame = ttk.Frame(self.root)
         root_frame.pack(fill="both", expand=True)
@@ -3439,7 +3780,7 @@ class PackBuilderApp:
         self.status_var.set("Starting...")
 
         self._build_result = {"done": False, "error": None, "zip_path": None, "no_compiler": False,
-                               "out_dir": out_dir, "warn_stdout": "", "log_path": None}
+                               "out_dir": out_dir, "warn_stdout": "", "log_path": None, "media_problems": []}
 
         def worker():
             try:
@@ -3469,6 +3810,7 @@ class PackBuilderApp:
                     status_cb=self._set_status
                 )
                 self._build_result["warn_stdout"] = stdout or ""
+                self._build_result["media_problems"] = verify_compiled_media(self.plan, build_dir)
 
                 # Compiler output only ever showed up transiently in the
                 # success dialog, with no way to go back and actually read it -
@@ -3535,14 +3877,7 @@ class PackBuilderApp:
             messagebox.showerror("Build failed", err)
             return
 
-        perm_note = (
-            "\n\nIMPORTANT: this pack's per-mood Advanced Settings (and any Preset/ramp you applied) "
-            "only take effect in-game if 'Allow full corruption permissions' (corruptionFullPerm) is turned "
-            "ON in Edgeware's own Configure window. This isn't something the pack file can turn on for you - "
-            "it's a separate toggle you (or whoever runs the pack) have to enable yourself, every time, before "
-            "the escalation will do anything. Without it, moods will still add/remove on schedule, but the pack "
-            "will look flat/static - none of the per-level pacing/intensity changes will apply."
-        )
+        perm_note = "\n\nMake sure 'Allow full corruption permissions' is ON in Edgeware for best results."
 
         if self._build_result.get("no_compiler"):
             messagebox.showinfo(
@@ -3558,16 +3893,22 @@ class PackBuilderApp:
         log_path = self._build_result.get("log_path")
         stdout = self._build_result.get("warn_stdout", "")
         warn_note = ""
-        if stdout and ("WARNING" in stdout or "ERROR" in stdout):
+        if stdout_has_real_warnings(stdout, self.plan):
             warn_note = f"\n\nNote: the compiler logged some warnings - check the log file for details:\n{log_path}"
         elif log_path:
             warn_note = f"\n\nFull compiler log saved to:\n{log_path}"
         yaml_note = "" if HAVE_YAML else "\n\n(PyYAML wasn't installed - pack.yml was written with a minimal fallback writer.)"
+
+        media_problems = self._build_result.get("media_problems") or []
+        media_note = ""
+        if media_problems:
+            media_note = "\n\nMedia notes:\n" + "\n".join(f"- {p}" for p in media_problems)
+
         messagebox.showinfo(
             "Pack built!",
             f"Finished pack:\n{zip_path}\n\n"
             f"(pack_source/ and pack_build/ inside that same folder are working files - "
-            f"safe to delete once you've confirmed the zip works.){warn_note}{yaml_note}{perm_note}"
+            f"safe to delete once you've confirmed the zip works.){warn_note}{yaml_note}{perm_note}{media_note}"
         )
 
         build_dir = self._build_result.get("build_dir")
@@ -3636,7 +3977,7 @@ class PackBuilderApp:
         self.status_var.set("Starting...")
 
         self._save_result = {"done": False, "error": None, "saved": False,
-                              "backup_folder": None, "warn_stdout": ""}
+                              "backup_folder": None, "warn_stdout": "", "media_problems": []}
 
         def worker():
             try:
@@ -3650,6 +3991,7 @@ class PackBuilderApp:
                     status_cb=self._set_status
                 )
                 self._save_result["warn_stdout"] = stdout or ""
+                self._save_result["media_problems"] = verify_compiled_media(self.plan, staging_build)
 
                 # A real compile failure raises before this point (caught
                 # below) - but also sanity-check the two files every pack
@@ -3702,22 +4044,54 @@ class PackBuilderApp:
         backup_folder = self._save_result.get("backup_folder")
         stdout = self._save_result.get("warn_stdout", "")
         warn_note = ""
-        if stdout and ("WARNING" in stdout or "ERROR" in stdout):
+        if stdout_has_real_warnings(stdout, self.plan):
             warn_note = "\n\nNote: the compiler logged some warnings - worth a skim if anything looks off in-game."
+        media_problems = self._save_result.get("media_problems") or []
+        media_note = ""
+        if media_problems:
+            media_note = "\n\nMedia notes:\n" + "\n".join(f"- {p}" for p in media_problems)
         messagebox.showinfo(
             "Changes saved",
             f"Rewrote the pack in place:\n{self.plan.loaded_from_folder}\n\n"
             f"Your original files were moved here, not deleted, in case anything looks wrong:\n"
             f"{backup_folder}\n\n"
-            f"Safe to delete that backup once you've confirmed everything works.{warn_note}"
+            f"Safe to delete that backup once you've confirmed everything works.{warn_note}{media_note}"
         )
 
 
 def main():
+    # Without this, Windows' taskbar derives the icon from whichever
+    # python.exe/pyw.exe is actually running this script, not from anything
+    # the window itself sets (iconbitmap/iconphoto) - it groups/falls back
+    # by the HOST INTERPRETER's own identity unless the process explicitly
+    # tells Windows "treat me as my own distinct application" via an
+    # AppUserModelID, set before any window exists. This is the actual
+    # missing piece behind the icon staying wrong even with a real .ico
+    # correctly wired up - confirmed against the documented Windows/Tk gap.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "BigWoodArt.EdgewarePackBuilder.GUI.1"
+            )
+        except Exception:
+            pass
+
     root = tk.Tk()
     PackBuilderApp(root)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Running windowless (pyw/.pyw) means an uncaught exception has
+        # nowhere to print to at all - without this, a startup crash would
+        # be completely invisible with zero trace anywhere.
+        import traceback
+        try:
+            (SCRIPT_DIR / "crash_log.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        except Exception:
+            pass
+        raise
