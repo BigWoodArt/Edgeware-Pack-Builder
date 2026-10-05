@@ -14,10 +14,5 @@ if errorlevel 1 (
 )
 
 echo Starting Edgeware++ Advanced Pack Builder...
-REM pyw (not py) runs windowless - no console attached to the GUI process
-REM itself. "start """ detaches it from THIS window too, so the console
-REM this .bat opened closes right away instead of hanging around for the
-REM program's whole runtime. Startup errors (the one case a console would
-REM actually have been useful for) go to startup_error.log instead of
-REM vanishing silently.
+REM pyw = windowless; startup errors go to startup_error.log.
 start "" pyw edgeware_pack_builder_gui.pyw 2>"%~dp0startup_error.log"

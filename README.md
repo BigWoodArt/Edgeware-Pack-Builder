@@ -10,13 +10,15 @@ Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - auto-ins
 
 **1 - Source & Pack Tool:** folder of mood subfolders (first = starting mood) + optional Pack Tool folder (enables one-click `.zip` build). **Load Existing Pack** (folder/zip) reopens one for editing.
 
-**2 - Whole-Experience:** 4 **Presets** (Slight Annoyance → Life-Ending Slavery) spread full intensity curves across all moods, editable after; doesn't touch hypno overlay. Pack info. **Mood Cycling** (seconds or popup-count) + optional per-mood ramp. **Pack-Wide Settings** (Corruption/Hibernate/Mitosis mode, Level Transition, Buttonless, button text). **Escalating Spirals/Denial** with Apply. Hypno/wallpaper/splash/Discord-status extras.
+**2 - Whole-Experience:** 4 **Presets** (Slight Annoyance → Life-Ending Slavery) spread full intensity curves across all moods, editable after; also set hypno overlay chance/strength (max 20%) and popup opacity (100%). Pack info. **Mood Cycling** (seconds or popup-count) + optional per-mood ramp. **Pack-Wide Settings** (Corruption/Hibernate/Mitosis mode, Level Transition, Buttonless, button text). **Escalating Spirals/Denial** with Apply. Hypno/wallpaper/splash/Discord-status extras.
 
 **3 - Media Review:** per-mood Images/Videos/Audio (add/remove, non-destructive) + Wallpaper picker. Unopened moods use source folder as-is.
 
 **4 - Per-Mood:** Captions/Notifications/Subliminal/Prompts/Denial/Website text (one per line; website supports `| arg1, arg2`). "Remove these moods" (earlier moods only). **Advanced Settings**: speed, popup-type odds, volume/concurrency, hypno & subliminal-text chance/strength, notifications, denial, movement, cycle override - blank/"(inherit)" = keep previous mood's value.
 
 ⚠️ **Hypno overlay** (`subliminalsChance/Alpha`) ≠ **subliminal text** (`capPopChance/Opacity/Timer`) - names are swapped from what you'd expect.
+
+⚠️ **`capPopTimer`** (subliminal text duration) is raw **milliseconds**, not seconds.
 
 ⚠️ **`corruptionFullPerm`** must be enabled in Edgeware's own config, or escalation stays flat regardless of what the pack sets.
 
@@ -42,25 +44,28 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 ## Version History
 
-- **v0.17.2 (current)** - The icon/console fixes in v0.17.1 weren't actually enough: Windows only lets a distinct taskbar icon through if the process registers its own AppUserModelID first, otherwise it falls back to whichever python.exe/pyw.exe is running (the "blank page"/"terminal" + Python logo icons were that fallback, not a bad .ico). Fixed. Also renamed the main script to `.pyw` so double-clicking it directly (not just via run.bat) is windowless too, and added a crash_log.txt safety net for startup errors with no console to print to.
-- **v0.17.1** - Fixed the taskbar icon only showing in the window's own title bar, not the actual Windows taskbar (needed a real multi-resolution .ico via iconbitmap, not just iconphoto). `run.bat` no longer leaves a console window open for the program's whole runtime - runs windowless via `pyw`, with startup errors going to `startup_error.log` instead of vanishing.
-- **v0.17** - M4A files misdetected as video by the compiler now get moved to the right folder automatically instead of just warned about. Suppressed a harmless compiler warning ("no default wallpaper.png") that fired even with no default wallpaper ever intended. Opening a `.epbproj` whose temp media was deleted now asks before loading settings-only. Shortened the corruption-permissions build note. Added a custom taskbar/window icon.
-- **v0.16** - Fixed real text corruption (curly quotes/ellipses becoming garbled `\u00e2\u20ac...` sequences) - the real compiler misreads pack.yml's encoding on some Windows setups; writing pack.yml as pure ASCII sidesteps it entirely. Added a post-build check that catches media files landing in the wrong type folder (M4A audio can get misdetected as video by the compiler) or missing entirely. Added Discord status text and a pack-wide popup button-text setting. Added a File menu (New Window, Save/Open Project as `.epbproj`, Quit). Added a startup check against this repo's own README for a newer version, with an option to open the GitHub page.
-- **v0.15** - Packs with no per-mood structure at all (pre-moods legacy Edgeware format - flat img/aud/vid, un-mood-tagged captions/prompt/web.json) now reconstruct into one "Everything" mood instead of loading empty; also fixed wallpapers being looked for in a wallpapers/ subfolder that doesn't actually exist in real compiled packs.
-- **v0.14** - Create New Pack now steps up a folder level if the selected one has no subfolders, and redirects to Load Existing Pack if it looks like an already-compiled pack instead.
-- **v0.13** - Page 1 relabeled for clarity: "Where is the folder of images?" → "Create New Pack", with a new "Load Existing Pack" header above the folder/zip buttons.
-- **v0.12.2** - Fixed a crash when a mood's `web` entries were plain strings instead of dicts (now normalized); Page 3 also hardened so one mood's build failure can't break the whole page anymore.
-- **v0.12.1** - Fixed reconstruction (packs with no `plan.json`) finding zero images for every mood - it only ever tried grouping media via `media.json`'s guessed/unverified shape; now uses `index.json`'s own per-mood media list instead.
-- **v0.12** - Save Changes to Pack: in-place save for folder-loaded packs, timestamped backup, purple accent.
-- **v0.11** - Fixed Pack Tool folder showing selected-but-blank after load. Audio section now collapsible.
-- **v0.10.1** - Fixed crash from background loads finishing after page teardown. Versioning now `X.Y.Z`.
-- **v0.10** - `config.json` baseline includes Corruption Level 1 values.
-- **v0.9** - Fixed `capPopTimer` unit bug (ms not seconds). More resilient loading. `plan.json` strips local paths.
-- **v0.8** - Added Media Review page; Wallpaper moved there.
-- **v0.7** - Added Level Transition + Buttonless toggles; fixed unresponsive toggles.
-- **v0.6** - Per-Mood redesigned with mood-tab sidebar + thumbnails; background loading.
-- **v0.5** - New preset tiers, wider coverage; added Pack-Wide Settings panel.
-- **v0.4** - Fixed corruption levels not triggering (values now rounded to int).
-- **v0.3** - Fixed subliminal-text/hypno-overlay key mixup; added build log.
-- **v0.2** - Fixed popup-count cycling typo; documented `corruptionFullPerm`; stale-file fix.
+One short line per entry.
+
+- **v1.0.0 (current)** - Cleanup release: removed dead code and comment bloat. Presets now set hypno overlay chance/strength (max 20%) and popup opacity (100%).
+- **v0.17.2** - Taskbar icon fix (own AppUserModelID); script renamed `.pyw`; `crash_log.txt` for startup errors.
+- **v0.17.1** - Real multi-resolution `.ico`; `run.bat` runs windowless.
+- **v0.17** - M4A misdetected as video is auto-moved; harmless compiler warning suppressed; settings-only load prompt; custom icon.
+- **v0.16** - Fixed garbled quotes (pack.yml written as ASCII); post-build media check; Discord status and button text; File menu; update check.
+- **v0.15** - Pre-mood legacy packs reconstruct into one "Everything" mood; wallpaper path fix.
+- **v0.14** - Create New Pack steps up a folder if needed; redirects compiled packs to Load.
+- **v0.13** - Page 1 relabeled.
+- **v0.12.2** - Fixed crash on plain-string `web` entries; Page 3 hardened.
+- **v0.12.1** - Fixed reconstruction finding no images.
+- **v0.12** - Save Changes to Pack (in place, backup, purple accent).
+- **v0.11** - Pack Tool folder display fix; collapsible audio.
+- **v0.10.1** - Fixed crash on late background loads; `X.Y.Z` versioning.
+- **v0.10** - `config.json` baseline includes Corruption Level 1.
+- **v0.9** - Fixed `capPopTimer` units (ms); sturdier loading; `plan.json` strips local paths.
+- **v0.8** - Media Review page; Wallpaper moved there.
+- **v0.7** - Level Transition + Buttonless toggles.
+- **v0.6** - Per-Mood mood-tab sidebar, thumbnails, background loading.
+- **v0.5** - New preset tiers; Pack-Wide Settings.
+- **v0.4** - Fixed corruption levels not triggering (int rounding).
+- **v0.3** - Fixed subliminal-text/hypno-overlay key mixup; build log.
+- **v0.2** - Fixed popup-count cycling typo; documented `corruptionFullPerm`.
 - **v0.1** - Initial release.

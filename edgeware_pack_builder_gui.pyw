@@ -1,38 +1,13 @@
 #!/usr/bin/env python3
 """
 Edgeware++ Advanced Pack Builder
-----------------------------------
-A single-program pack builder with a full Mood Settings system, hover
-tooltips, and load/resume support.
 
-Three pages:
-  1. Source folder + mood scan + Pack Tool location (auto-detected next
-     to this script if possible, otherwise remembered from last time via
-     builder_settings.json) + Load an existing pack.
-  2. Whole-experience settings: pack info, mood cycling, escalating
-     spirals, pack-wide extras (hypno overlays, default wallpaper,
-     loading splash image), build options.
-  3. Per-mood settings: collapsible cards (captions, notifications,
-     wallpaper trigger, audio files, which earlier moods to remove when
-     this one starts, and an Advanced Settings panel of real Edgeware++
-     config knobs). Every mood - including the first - gets its own
-     corruption level; nothing relies on Edgeware's reserved "default"
-     mood, since testing showed that mood's content doesn't reliably
-     display even when nominally active.
+Pages: (1) source folder / Pack Tool / load existing pack, (2) whole-pack
+settings and presets, (3) media review, (4) per-mood settings.
 
-Data entered anywhere is kept in a PackPlan the moment you navigate away
-from a page (Back included), and every build also writes a plan.json
-snapshot next to pack.yml. Loading that plan.json back is exact. Loading
-a pack that has no plan.json (anything not built by this tool) falls
-back to reconstructing settings from the compiled pack's own info.json/
-index.json/media.json/corruption.json/config.json - best-effort, since
-I haven't been able to verify the exact compiled JSON schema against a
-real pack yet, flagged clearly in the UI when that path is used.
-
-Build Pack runs the actual compile + zip on a background thread with an
-indeterminate progress bar, since the Pack Tool compiler doesn't report
-real progress and the UI would otherwise freeze for however long it
-takes.
+Edits live in a PackPlan. Every build writes plan.json next to pack.yml for
+exact reload; packs without one are reconstructed best-effort from their
+compiled JSON. Compile + zip runs on a background thread.
 """
 
 import json
@@ -41,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import urllib.request
 import webbrowser
@@ -69,7 +43,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "0.17.2"
+TOOL_VERSION = "1.0.0"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
 REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
@@ -80,15 +54,8 @@ def _version_tuple(v: str) -> tuple:
 
 
 def check_for_newer_version(current_version: str, timeout: int = 4):
-    """Returns the newer version string found in the repo's own README (its
-    Version History section, same "vX.Y.Z (current)" line this project's
-    own README keeps updated) if the one on GitHub is newer than what's
-    running, else None. Never raises - reads the repo's README rather than
-    GitHub's release/tag API, since releases here use a rolling tag name
-    rather than one per version, so the README is the one place that
-    reliably says what the actual latest version is. A stale/behind repo
-    (not pushed recently) just means this reports nothing, same as being
-    genuinely up to date - it only ever acts when the repo is AHEAD."""
+    """Return the newer version from the repo README's "**vX.Y.Z (current)**"
+    line if it is ahead of current_version, else None. Never raises."""
     try:
         with urllib.request.urlopen(REPO_README_RAW_URL, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
@@ -458,10 +425,6 @@ class ToggleSwitch(tk.Label):
         if self._command:
             self._command()
 
-    def set_enabled(self, enabled: bool):
-        self._enabled = enabled
-        self._redraw()
-
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -537,9 +500,6 @@ class PackPlan:
     loading_splash_path: str = ""
 
     mood_configs: dict = field(default_factory=dict)
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
 
 
 def scan_moods(root: Path) -> list:
@@ -651,10 +611,6 @@ def materialize_mood_media(plan, mood_name: str) -> list:
 # pack.yml generation
 # ---------------------------------------------------------------------------
 
-def _lerp(a: int, b: int, t: float) -> int:
-    return round(a + (b - a) * t)
-
-
 def _clean_num(x):
     """Always collapse to a plain int. Edgeware++'s own corruption.json
     loader (edgeware/src/pack/load.py) validates every per-level config
@@ -663,9 +619,7 @@ def _clean_num(x):
     isolation: a single float value on a single mood fails validation for
     every level in the pack at once, silently emptying out corruption
     entirely (moods stop cycling, "Valid Levels" reads empty for
-    everything). This used to round to 1 decimal place to let fields like
-    movingSpeed ramp smoothly - that's exactly what was breaking real
-    packs, so it's int-only now, no exceptions."""
+    everything). Always int."""
     return round(x)
 
 
@@ -718,6 +672,9 @@ PRESETS = {
         "audioVolume": (40, 55, "exp"),
         "maxVideos": (1, 2, "exp"),
         "videoVolume": (40, 55, "exp"),
+        "subliminalsChance": (0, 5, "linear"),
+        "subliminalsAlpha": (10, 10, "linear"),
+        "lkScaling": (100, 100, "linear"),
     },
     "Bit of a Problem": {
         "delay": (3000, 1200, "exp"),
@@ -742,6 +699,9 @@ PRESETS = {
         "audioVolume": (55, 70, "exp"),
         "maxVideos": (2, 3, "exp"),
         "videoVolume": (55, 70, "exp"),
+        "subliminalsChance": (5, 10, "linear"),
+        "subliminalsAlpha": (10, 15, "linear"),
+        "lkScaling": (100, 100, "linear"),
     },
     "Real Addiction": {
         "delay": (1750, 700, "exp"),
@@ -766,6 +726,9 @@ PRESETS = {
         "audioVolume": (70, 85, "exp"),
         "maxVideos": (3, 5, "exp"),
         "videoVolume": (70, 85, "exp"),
+        "subliminalsChance": (10, 15, "linear"),
+        "subliminalsAlpha": (15, 20, "linear"),
+        "lkScaling": (100, 100, "linear"),
     },
     "Life-Ending Slavery": {
         "delay": (1250, 500, "exp"),
@@ -790,21 +753,17 @@ PRESETS = {
         "audioVolume": (90, 100, "exp"),
         "maxVideos": (4, 7, "exp"),
         "videoVolume": (90, 100, "exp"),
+        "subliminalsChance": (15, 20, "linear"),
+        "subliminalsAlpha": (20, 20, "linear"),
+        "lkScaling": (100, 100, "linear"),
     },
 }
 
 
 def build_corruption_levels(plan: PackPlan) -> list:
-    """
-    Every mood - including the first one - gets its own explicit corruption
-    level that adds it. Nothing is assumed active by default; this matches
-    pack.yml's own documented example rather than relying on Edgeware's
-    reserved "default" mood, which testing showed doesn't reliably display
-    its content even when nominally active.
-
-    Moods ACCUMULATE unless the user explicitly picked moods to remove via
-    that mood's "Remove these moods" list.
-    """
+    """One corruption level per mood, each adding its mood (no reliance on
+    Edgeware's reserved "default" mood). Moods accumulate unless a mood's
+    "Remove these moods" list says otherwise."""
     n = len(plan.moods)
     levels = []
     for i in range(n):
@@ -854,8 +813,7 @@ def build_pack_yml_dict(plan: PackPlan) -> dict:
     base_raw = {
         "corruptionMode": plan.pack_corruption_mode,
         "corruptionTrigger": "Timed" if plan.cycle_mode == "timer" else "Popup",
-        # NOTE: seconds, confirmed against items.py's s_to_ms converter for
-        # corruption_time (see conversation history for verification).
+        # seconds (items.py s_to_ms)
         "corruptionTime": plan.cycle_seconds,
         "corruptionPopups": plan.popups_per_mood,
         "corruptionFullPerm": True,
@@ -1616,11 +1574,7 @@ def reconstruct_plan_from_compiled_pack(folder: Path) -> tuple:
                 mc["advanced"] = advanced
 
             if wallpaper_name:
-                # Wallpapers sit at the pack's root, not a wallpapers/
-                # subfolder - confirmed against the real compiler's own
-                # copy_wallpapers() output (see conversation history).
-                # wallpapers/ kept as a fallback in case of a different
-                # compiler version/convention.
+                # Wallpapers sit at the pack root; wallpapers/ is a fallback.
                 candidate = root / wallpaper_name
                 if not candidate.is_file():
                     candidate = root / "wallpapers" / wallpaper_name
@@ -1756,9 +1710,7 @@ class PackBuilderApp:
         self.settings = load_settings()
         self.reconstructed_warnings = []
 
-        # Both sidebars' thumbnail caches - initialized unconditionally here
-        # rather than inside whichever page happens to build first (see the
-        # bugfix note on _get_mood_thumbnail for why that ordering mattered).
+        # Thumbnail caches for both sidebars.
         self._tab_photo_refs = {}
         self._media_tab_photo_refs = {}
 
@@ -1808,7 +1760,6 @@ class PackBuilderApp:
         self.mood_widgets: dict = {}
         self._banner_img = None
 
-        self.progress_var = None
         self._build_result = {}
         self._build_thread = None
 
@@ -2071,11 +2022,7 @@ class PackBuilderApp:
         load_zip_btn.pack(side="left", padx=(8, 0))
         tip(load_zip_btn, TOOLTIPS["load_pack"])
 
-        # Shared small progress indicator for folder scanning / zip
-        # extraction - both can take a visible moment (zip extraction
-        # especially, for packs with real media in them) and used to just
-        # freeze the whole window with no feedback while that happened on
-        # the main thread. Not packed here - shown only while one is running.
+        # Progress indicator for scanning/extraction; shown only while running.
         self.load_status_var = StringVar(value="")
         self.load_progress = ttk.Progressbar(frm, mode="indeterminate")
         self.load_status_label = ttk.Label(frm, textvariable=self.load_status_var, style="Muted.TLabel")
@@ -2407,15 +2354,7 @@ class PackBuilderApp:
         if self.plan.pack_tool_dir:
             self.pack_tool_var.set(self.plan.pack_tool_dir)
         else:
-            # plan.json deliberately never carries pack_tool_dir anymore (a
-            # purely local setting, stripped for privacy before shipping -
-            # see sanitized_plan_json), so EVERY loaded pack reaches this
-            # branch. Used to just leave the display alone here, which kept
-            # showing whatever it said BEFORE the load - looking correct on
-            # Page 1 while the actual value used at build time was blank
-            # underneath it, only surfacing as "Pack tool not found" at
-            # build time. Re-run the same auto-detect/remembered-setting
-            # check __init__ does instead of leaving it stale or blank.
+            # plan.json never carries pack_tool_dir, so re-run auto-detect here.
             auto = find_pack_tool_dir()
             if auto:
                 self.plan.pack_tool_dir = auto
@@ -2875,14 +2814,7 @@ class PackBuilderApp:
         main_scroll.pack(fill="both", expand=True)
         self._media_main_scroll = main_scroll
 
-        # Cards are NOT built here anymore - only an empty holder per mood.
-        # This used to build every mood's full thumbnail grid immediately,
-        # which is exactly what was hanging the page open on any pack with a
-        # real amount of media: it meant opening/cropping/resizing every
-        # image in every mood before the page could even render. Now a
-        # mood's card is only actually built (see _select_media_tab) the
-        # first time you click into it, and even that happens in the
-        # background (see _build_media_card's reload_media).
+        # Cards are built lazily, in the background, when a mood tab is first opened.
         self.media_widgets = {}
         self.media_card_frames = {}
         self._media_built_moods = set()
@@ -3060,8 +2992,7 @@ class PackBuilderApp:
                 else:
                     err_lbl = tk.Label(tile, text="[?]", width=10, height=5, bg=PANEL_BG, fg=MUTED_FG)
                     err_lbl.pack()
-                    # Used to give zero indication of why a preview failed -
-                    # show the actual error on hover now instead of a bare [?].
+                    # Show the actual error on hover.
                     err_text = errors.get(path_str)
                     tip(err_lbl, f"Couldn't load a preview for this file:\n{err_text}" if err_text
                         else "Couldn't load a preview for this file.")
@@ -3094,13 +3025,7 @@ class PackBuilderApp:
             build_one_grid(vid_grid, video_paths, thumbnails, is_video=True)
 
         def reload_media():
-            """Regenerate thumbnails in the background so switching moods (or
-            adding/removing a file) never blocks the UI - this used to build
-            every mood's full thumbnail grid eagerly the moment the Media
-            Review page opened, which is exactly what was hanging on packs
-            with any real amount of media. Now it only happens for the
-            currently-selected mood, and the actual file I/O + resizing runs
-            off the main thread."""
+            """Regenerate the selected mood's thumbnails off the main thread."""
             img_grid.pack_forget()
             vid_grid.pack_forget()
             img_status_var.set("Loading previews...")
@@ -3125,13 +3050,7 @@ class PackBuilderApp:
                                 (THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
                             imgs[path_str] = img  # raw PIL Image - PhotoImage must be made on the main thread
                         except Exception as e:
-                            # Used to be a bare `except Exception: imgs[path_str] = None` -
-                            # every failure just silently became "[?]" with no way to tell
-                            # why. Most likely cause on Windows with real, descriptively-
-                            # named files: the classic 260-character path limit, which
-                            # plain open() hits as a FileNotFoundError even though the file
-                            # genuinely exists - long_path_safe() above should dodge that,
-                            # but keep the actual reason around in case it's something else.
+                            # Keep the reason (e.g. Windows 260-char path limit) for the tooltip.
                             imgs[path_str] = None
                             errors[path_str] = f"{type(e).__name__}: {e}"
                 result["images"] = imgs
@@ -3140,14 +3059,7 @@ class PackBuilderApp:
             threading.Thread(target=worker, daemon=True).start()
 
             def poll():
-                # The whole page (or the whole app, e.g. loading a different
-                # zip mid-flight) can get torn down while this background
-                # thread is still working - card.winfo_exists() is False
-                # once that's happened, and touching any of this mood's
-                # widgets afterward (img_progress.stop() in particular) was
-                # raising TclError: invalid command name, since the actual
-                # Tk widget behind it no longer exists. Bail out quietly
-                # instead - there's nothing meaningful left to update.
+                # Page torn down mid-load; widgets are gone.
                 if not card.winfo_exists():
                     return
                 if result["images"] is None:
@@ -3313,12 +3225,7 @@ class PackBuilderApp:
             try:
                 self._build_mood_card(card_holder, name, mood_index=i)
             except Exception as e:
-                # One mood's malformed data used to crash this whole loop,
-                # leaving every mood after it (and page 3 as a whole) in a
-                # half-built, broken state - a placeholder here instead
-                # means the rest of the pack is still usable, and this one
-                # mood's problem is visible instead of silently corrupting
-                # everything else.
+                # Placeholder so one bad mood doesn't break the page.
                 for w in card_holder.winfo_children():
                     w.destroy()
                 err_frame = ttk.LabelFrame(card_holder, text=f"{name} - couldn't load", padding=10)
@@ -3348,20 +3255,7 @@ class PackBuilderApp:
 
         `cache` must be a dict the caller keeps a live reference to for as
         long as the resulting image needs to stay on screen - Tk drops a
-        PhotoImage as soon as nothing still references it, even if it's
-        actively packed into a visible Label. BUG HISTORY: this used to
-        always write into self._tab_photo_refs, which only ever got
-        initialized inside _build_step3 - fine when Per-Mood was the only
-        caller, but once the Media Review page started calling this too
-        (and now runs BEFORE Per-Mood in the flow), the first-ever call hit
-        a genuine AttributeError on self._tab_photo_refs not existing yet.
-        That line was inside a bare `except Exception: continue`, so it
-        silently ate the error and just moved to the next candidate file -
-        which failed the same way - until every candidate was exhausted and
-        it returned None. Second visit "worked" only because Per-Mood had
-        been visited at least once by then, creating the attribute for
-        good. Passing the cache in explicitly instead removes the shared,
-        order-dependent implicit state entirely.
+        PhotoImage as soon as nothing references it, even if it is on screen.
         """
         if not HAVE_PIL:
             return None
@@ -3517,13 +3411,7 @@ class PackBuilderApp:
         if existing.get("web_entries"):
             web_lines = []
             for w in existing["web_entries"]:
-                # w is normally a {"url": ..., "args": [...]} dict, but a
-                # pack from a different source (or an older/other-tool
-                # convention) can have plain URL strings here instead - this
-                # used to crash the ENTIRE Page 3 build loop on w.get(...)
-                # the moment any mood hit that shape, leaving every mood
-                # after it (and this one) never actually built, which is
-                # what "all pictures broke" after this was actually seeing.
+                # w is normally {"url", "args"}; other packs may use plain strings.
                 if isinstance(w, str):
                     web_lines.append(w)
                     continue
@@ -3561,9 +3449,7 @@ class PackBuilderApp:
         self.mood_widgets[mood_name] = widgets
 
     def _build_advanced_section(self, card, mood_name, widgets, existing_advanced):
-        # Always-visible full section now (used to be collapsed behind a
-        # toggle button) - just a spacer/separator to set it apart from the
-        # normal fields above, then straight into the groups.
+        # Spacer/separator, then the groups.
         ttk.Frame(card, height=14).pack(fill="x")
         ttk.Separator(card, orient="horizontal").pack(fill="x", pady=(0, 8))
         ttk.Label(card, text="Advanced Settings", font=("Segoe UI", 11, "bold")).pack(anchor="w")
@@ -3607,19 +3493,7 @@ class PackBuilderApp:
                     # other Advanced field) / ON / OFF. A plain 2-state switch
                     # can't represent "inherit", so this cycles through all
                     # three on click instead of just flipping.
-                    #
-                    # BUGFIX: paint/cycle used to be defined with plain `def`
-                    # directly in this loop body, so `paint` was a name in
-                    # _build_advanced_section's own scope that got reassigned
-                    # every iteration - every field's `cycle` closure looked
-                    # up "paint" by name at CALL time, not definition time, so
-                    # every single toggle ended up calling whichever field's
-                    # paint happened to be defined LAST (singleMode, being
-                    # last in the field list). Clicking any other toggle
-                    # updated its own variable fine but then painted the
-                    # wrong label. Fixed by giving each field its own fully
-                    # self-contained pair via a factory, so nothing is shared
-                    # across iterations.
+                    # Factory gives each field its own paint/cycle closure.
                     def make_toggle_handlers(v, widget):
                         def paint():
                             cur = v.get()
