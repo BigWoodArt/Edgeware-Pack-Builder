@@ -4,7 +4,7 @@ GUI for building Edgeware++ packs from a folder of mood subfolders - no hand-wri
 
 ## Setup
 
-Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - auto-installs `pyyaml` + `pillow`, launches app. `banner.png` must stay next to the script. Pack Tool folder auto-detects if placed inside/next to it; otherwise remembered after first manual set.
+Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - auto-installs `pyyaml` + `pillow`, launches app. `banner.png` must stay next to the script. Pack Tool folder auto-detects nearby (up to 3 folders up/down); otherwise pick it manually - any folder within 3 levels of it works - and it's remembered.
 
 ## Pages
 
@@ -46,7 +46,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.0 (current)** - Cleanup release: removed dead code and comment bloat. Presets now set hypno overlay chance/strength (max 20%) and popup opacity (100%).
+- **v1.0.1 (current)** - Pack Tool search now looks up to 3 folders up/down from your selection.
+- **v1.0.0** - Cleanup release: removed dead code and comment bloat. Presets now set hypno overlay chance/strength (max 20%) and popup opacity (100%).
 - **v0.17.2** - Taskbar icon fix (own AppUserModelID); script renamed `.pyw`; `crash_log.txt` for startup errors.
 - **v0.17.1** - Real multi-resolution `.ico`; `run.bat` runs windowless.
 - **v0.17** - M4A misdetected as video is auto-moved; harmless compiler warning suppressed; settings-only load prompt; custom icon.

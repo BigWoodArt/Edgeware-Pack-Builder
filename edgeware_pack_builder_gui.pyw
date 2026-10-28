@@ -11,6 +11,7 @@ compiled JSON. Compile + zip runs on a background thread.
 """
 
 import json
+import os
 import random
 import re
 import shutil
@@ -43,7 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.0.1"
 SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
 REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
@@ -159,14 +160,45 @@ def save_settings(d: dict) -> None:
         pass  # best-effort - not worth bothering the user about
 
 
-def find_pack_tool_dir() -> str:
-    """Look for src/main.py next to this script, or one level up (covers
-    both 'this script sits inside the Pack Tool folder' and 'this script
-    sits in a subfolder of the Pack Tool folder')."""
-    for candidate in (SCRIPT_DIR, SCRIPT_DIR.parent):
-        if (candidate / "src" / "main.py").is_file():
-            return str(candidate)
+_SKIP_DIRS = {"__pycache__", "node_modules", "loaded_packs"}
+
+
+def locate_pack_tool(start, depth: int = 3, max_dirs: int = 5000) -> str:
+    """Nearest folder containing src/main.py within `depth` steps of `start`,
+    where a step is one folder up or down (so a sibling is 2 steps away).
+    Returns "" if none, or if more than max_dirs folders would be scanned."""
+    start = Path(start)
+    anc = [start, *start.parents][:depth + 1]
+    levels = [[[a]] for a in anc]  # levels[k][m] = folders m below ancestor k
+    scanned = 0
+
+    for t in range(depth + 1):
+        for k in range(min(t, len(anc) - 1) + 1):
+            m, lv = t - k, levels[k]
+            while len(lv) <= m:
+                nxt = []
+                for p in lv[-1]:
+                    try:
+                        with os.scandir(p) as it:
+                            kids = sorted(e.path for e in it
+                                          if e.is_dir(follow_symlinks=False)
+                                          and not e.name.startswith(".") and e.name not in _SKIP_DIRS)
+                    except OSError:
+                        continue
+                    scanned += len(kids)
+                    if scanned > max_dirs:
+                        return ""
+                    nxt.extend(Path(x) for x in kids)
+                lv.append(nxt)
+            for p in lv[m]:
+                if (p / "src" / "main.py").is_file():
+                    return str(p)
     return ""
+
+
+def find_pack_tool_dir() -> str:
+    """Auto-detect the Pack Tool near this script."""
+    return locate_pack_tool(SCRIPT_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -2049,7 +2081,7 @@ class PackBuilderApp:
 
         pt_frame = ttk.LabelFrame(frm, text="Pack Tool location (optional, enables one-click build)", padding=10)
         pt_frame.pack(fill="x", pady=(15, 5))
-        ttk.Label(pt_frame, text="Folder containing src/main.py:", style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(pt_frame, text="Pack Tool folder (any folder within 3 levels of it works):", style="Muted.TLabel").pack(anchor="w")
         pt_row = ttk.Frame(pt_frame)
         pt_row.pack(fill="x", pady=(4, 0))
         pt_entry = ttk.Entry(pt_row, textvariable=self.pack_tool_var, state="readonly")
@@ -2201,18 +2233,23 @@ class PackBuilderApp:
         self.next_btn.config(state="normal")
 
     def _pick_pack_tool(self):
-        chosen = filedialog.askdirectory(title="Select the Pack Tool folder (contains src/main.py)")
+        chosen = filedialog.askdirectory(title="Select the Pack Tool folder (or any folder near it)")
         if not chosen:
             return
-        if not (Path(chosen) / "src" / "main.py").is_file():
+        found = locate_pack_tool(chosen)
+        note = ""
+        if found and Path(found) != Path(chosen):
+            note = "(found near your selection)"
+            chosen = found
+        elif not found:
             messagebox.showwarning(
-                "src/main.py not found",
-                f"'{chosen}' doesn't have a src/main.py inside it - double check you picked "
-                f"the Pack Tool folder itself (the one PackToolScript.bat lives in)."
+                "Pack Tool not found",
+                f"No src/main.py within 3 folders up or down from '{chosen}'. Pick the Pack Tool "
+                f"folder (the one PackToolScript.bat lives in), or a folder near it."
             )
         self.plan.pack_tool_dir = chosen
         self.pack_tool_var.set(chosen)
-        self.pack_tool_note_var.set("")
+        self.pack_tool_note_var.set(note)
         self.settings["pack_tool_dir"] = chosen
         save_settings(self.settings)
 
