@@ -46,7 +46,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.1 (current)** - Pack Tool search now looks up to 3 folders up/down from your selection.
+- **v1.0.2 (current)** - Added MIT license; fixed `.gitignore` filename.
+- **v1.0.1** - Pack Tool search now looks up to 3 folders up/down from your selection.
 - **v1.0.0** - Cleanup release: removed dead code and comment bloat. Presets now set hypno overlay chance/strength (max 20%) and popup opacity (100%).
 - **v0.17.2** - Taskbar icon fix (own AppUserModelID); script renamed `.pyw`; `crash_log.txt` for startup errors.
 - **v0.17.1** - Real multi-resolution `.ico`; `run.bat` runs windowless.
@@ -70,3 +71,7 @@ One short line per entry.
 - **v0.3** - Fixed subliminal-text/hypno-overlay key mixup; build log.
 - **v0.2** - Fixed popup-count cycling typo; documented `corruptionFullPerm`.
 - **v0.1** - Initial release.
+
+## License
+
+MIT - see `LICENSE`.
