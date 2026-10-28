@@ -44,8 +44,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.2"
-SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"
+TOOL_VERSION = "1.0.3"
+SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
+LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
 REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
 
@@ -147,10 +148,14 @@ def style_text_widget(widget: tk.Text):
 # ---------------------------------------------------------------------------
 
 def load_settings() -> dict:
-    try:
-        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    for path in (SETTINGS_PATH, LEGACY_SETTINGS_PATH):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and (data or path is SETTINGS_PATH):
+                return data
+        except Exception:
+            continue
+    return {}
 
 
 def save_settings(d: dict) -> None:

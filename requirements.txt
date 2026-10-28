@@ -1,2 +1,2 @@
-pyyaml
-pillow
+pyyaml>=5.4
+pillow>=9.0
