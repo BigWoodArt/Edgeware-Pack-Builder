@@ -50,7 +50,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.6 (current)** - One-click update from inside the app; settings kept, old files backed up to `_update_backup/`.
+- **v1.0.7 (current)** - Old projects with a stale Pack Tool path now use the bundled one; harmless compiler warnings hidden.
+- **v1.0.6** - One-click update from inside the app; settings kept, old files backed up to `_update_backup/`.
 - **v1.0.5** - App offers to install missing packages itself on startup.
 - **v1.0.4** - Pack Tool bundled; `run.bat` installs all dependencies on first run.
 - **v1.0.3** - Settings saved to untracked `user_settings.json` (old file migrates); dependency minimums; zip attached to releases.

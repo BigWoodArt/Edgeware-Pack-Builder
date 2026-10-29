@@ -46,7 +46,7 @@ SCRIPT_DIR = SCRIPT_PATH.parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.6"
+TOOL_VERSION = "1.0.7"
 SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
 LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
@@ -1338,21 +1338,23 @@ def verify_compiled_media(plan, build_dir: Path) -> list:
 
 
 def stdout_has_real_warnings(stdout: str, plan) -> bool:
-    """Whether the compiler's output has anything actually worth flagging
-    in the success dialog - filters out one specific, guaranteed-harmless
-    line first: the real compiler unconditionally warns "No default
-    wallpaper.png found" any time no wallpaper file happens to be literally
-    named wallpaper.png, even when no default wallpaper was ever set and
-    per-mood wallpapers are working correctly. Confirmed straight from the
-    compiler's own copy_wallpapers() - it has no way to know the absence
-    was intentional. The raw log file still gets the full, unfiltered
-    output either way - this only affects whether the success dialog
-    nudges the user to go check it."""
+    """Whether the compiler output has warnings worth flagging in the success
+    dialog. The compiler unconditionally warns about optional pieces that were
+    simply never used (default wallpaper.png, hypno/, subliminals/, wallpapers/
+    folders); those are dropped unless the plan actually uses them. The log file
+    always keeps the full output."""
     if not stdout:
         return False
-    lines = stdout.splitlines()
+    has_wallpapers = plan.default_wallpaper_path or any(
+        mc.get("wallpaper_change") for mc in plan.mood_configs.values())
+    benign = [r"[\\/]subliminals does not exist"]
     if not plan.default_wallpaper_path:
-        lines = [ln for ln in lines if "No default wallpaper.png found" not in ln]
+        benign.append("No default wallpaper.png found")
+    if not has_wallpapers:
+        benign.append(r"[\\/]wallpapers does not exist")
+    if not plan.hypno_paths:
+        benign.append(r"[\\/]hypno does not exist")
+    lines = [ln for ln in stdout.splitlines() if not any(re.search(pat, ln) for pat in benign)]
     filtered = "\n".join(lines)
     return "WARNING" in filtered or "ERROR" in filtered
 
@@ -2551,10 +2553,13 @@ class PackBuilderApp:
         self.loading_splash_path = self.plan.loading_splash_path
         self.loading_splash_label_var.set(Path(self.loading_splash_path).name if self.loading_splash_path else "No image selected")
 
-        if self.plan.pack_tool_dir:
+        if self.plan.pack_tool_dir and (Path(self.plan.pack_tool_dir) / "src" / "main.py").is_file():
             self.pack_tool_var.set(self.plan.pack_tool_dir)
+            self.pack_tool_note_var.set(pack_tool_note(self.plan.pack_tool_dir) if Path(self.plan.pack_tool_dir) == SCRIPT_DIR / "pack_tool" else "")
         else:
-            # plan.json never carries pack_tool_dir, so re-run auto-detect here.
+            # plan.json carries no pack_tool_dir, and a saved .epbproj's can be stale
+            # (moved or other machine): re-run auto-detect.
+            self.plan.pack_tool_dir = ""
             auto = find_pack_tool_dir()
             if auto:
                 self.plan.pack_tool_dir = auto
@@ -3813,6 +3818,12 @@ class PackBuilderApp:
         either one fail or produce a broken pack. Shows its own warning
         dialogs; returns False if the caller should stop."""
         self._sync_step2_into_plan()
+        if self.plan.pack_tool_dir and not (Path(self.plan.pack_tool_dir) / "src" / "main.py").is_file():
+            auto = find_pack_tool_dir()
+            if auto:
+                self.plan.pack_tool_dir = auto
+                self.pack_tool_var.set(auto)
+                self.pack_tool_note_var.set(pack_tool_note(auto))
         parse_errors = self._sync_moods_into_plan(strict=True)
 
         if parse_errors:
