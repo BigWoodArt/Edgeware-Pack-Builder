@@ -44,7 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.4"
+TOOL_VERSION = "1.0.5"
 SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
 LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
@@ -1135,6 +1135,74 @@ def find_python_launcher() -> str:
         if shutil.which(candidate):
             return candidate
     return sys.executable
+
+
+REQUIRED_PACKAGES = {"yaml": "pyyaml", "PIL": "pillow", "filetype": "filetype",
+                     "voluptuous": "voluptuous", "pyffmpeg": "pyffmpeg"}
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def missing_packages() -> list:
+    """pip names the Pack Tool's Python (find_python_launcher) can't import.
+    Returns [] if the check itself fails, so it never blocks startup."""
+    code = ("import importlib.util as u, sys; "
+            "print(','.join(m for m in sys.argv[1:] if u.find_spec(m) is None))")
+    try:
+        out = subprocess.run([find_python_launcher(), "-c", code, *REQUIRED_PACKAGES],
+                             capture_output=True, text=True, timeout=30,
+                             creationflags=_NO_WINDOW).stdout.strip()
+    except Exception:
+        return []
+    return [REQUIRED_PACKAGES[m] for m in out.split(",") if m in REQUIRED_PACKAGES]
+
+
+def install_packages(packages: list) -> tuple:
+    """pip-install into the Pack Tool's Python. Returns (ok, last output lines)."""
+    try:
+        r = subprocess.run([find_python_launcher(), "-m", "pip", "install", *packages],
+                           capture_output=True, text=True, timeout=900, creationflags=_NO_WINDOW)
+    except Exception as e:
+        return False, str(e)
+    return r.returncode == 0, "\n".join((r.stdout + r.stderr).strip().splitlines()[-12:])
+
+
+def ensure_dependencies(root: tk.Tk) -> None:
+    missing = missing_packages()
+    if not missing:
+        return
+    names = ", ".join(missing)
+    if not messagebox.askyesno(
+            "Install required packages?",
+            f"Building packs needs: {names}.\n\nInstall now? This needs internet and may take "
+            f"a minute.\n\nChoose No to skip; building packs won't work until they're installed "
+            f"(running run.bat also installs them)."):
+        return
+    win = tk.Toplevel(root)
+    win.title("Installing...")
+    win.resizable(False, False)
+    win.protocol("WM_DELETE_WINDOW", lambda: None)
+    ttk.Label(win, text=f"Installing {names}...", padding=20).pack()
+    bar = ttk.Progressbar(win, mode="indeterminate", length=280)
+    bar.pack(padx=20, pady=(0, 20))
+    bar.start(12)
+    result = {}
+    threading.Thread(target=lambda: result.update(r=install_packages(missing)), daemon=True).start()
+
+    def poll():
+        if "r" not in result:
+            root.after(200, poll)
+            return
+        bar.stop()
+        win.destroy()
+        ok, log = result["r"]
+        if ok:
+            messagebox.showinfo("Done", "Packages installed.")
+        else:
+            messagebox.showerror("Install failed",
+                                 f"{log}\n\nTry running:\n  py -m pip install {' '.join(missing)}")
+
+    poll()
+    root.wait_window(win)
 
 
 def verify_compiled_media(plan, build_dir: Path) -> list:
@@ -3998,7 +4066,10 @@ def main():
             pass
 
     root = tk.Tk()
+    root.withdraw()
+    ensure_dependencies(root)
     PackBuilderApp(root)
+    root.deiconify()
     root.mainloop()
 
 

@@ -4,7 +4,7 @@ GUI for building Edgeware++ packs from a folder of mood subfolders - no hand-wri
 
 ## Setup
 
-Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - installs what's needed on first run, then launches the app. The Pack Tool is bundled in `pack_tool/` and found automatically; to use another copy, pick it (or any folder within 3 levels of it) and it's remembered. `banner.png` must stay next to the script.
+Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - installs what's needed on first run, then launches the app. Launching `edgeware_pack_builder_gui.pyw` directly works too; it offers to install anything missing. The Pack Tool is bundled in `pack_tool/` and found automatically; to use another copy, pick it (or any folder within 3 levels of it) and it's remembered. `banner.png` must stay next to the script.
 
 ## Pages
 
@@ -46,7 +46,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.4 (current)** - Pack Tool bundled; `run.bat` installs all dependencies on first run.
+- **v1.0.5 (current)** - App offers to install missing packages itself on startup.
+- **v1.0.4** - Pack Tool bundled; `run.bat` installs all dependencies on first run.
 - **v1.0.3** - Settings saved to untracked `user_settings.json` (old file migrates); dependency minimums; zip attached to releases.
 - **v1.0.2** - Added MIT license; fixed `.gitignore` filename.
 - **v1.0.1** - Pack Tool search now looks up to 3 folders up/down from your selection.
