@@ -10,3 +10,4 @@ __pycache__/
 
 # Per-user settings
 user_settings.json
+_update_backup/

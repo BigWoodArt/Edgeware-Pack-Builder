@@ -34,6 +34,10 @@ Folder-loaded packs get **Save Changes to Pack** instead - saves in place, times
 
 `plan.json` present → exact reload. Absent → offers best-effort reconstruction from the pack's own JSON files (unparseable bits skipped + reported, not silent).
 
+## Updating
+
+When a newer version exists, the app offers **Update now**: it downloads the latest files, keeps your settings and loaded packs, and restarts. Git checkouts update with `git pull` instead. If an update fails, nothing is changed.
+
 ## Limitations
 
 Video compression uses `pyffmpeg`, which may download ffmpeg on first use (needs internet). If the build fails with it on, turn it off - everything else still works. Zips extract to `loaded_packs/` (not temp) for path stability. Missing wallpaper → build stops with a clear error. Video thumbnails are placeholder icons. No dangerous settings (fill/panic-disable) by design. webp black-square is a known Edgeware++ bug. Reconstruction is unverified against a real compiled pack.
@@ -46,7 +50,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.5 (current)** - App offers to install missing packages itself on startup.
+- **v1.0.6 (current)** - One-click update from inside the app; settings kept, old files backed up to `_update_backup/`.
+- **v1.0.5** - App offers to install missing packages itself on startup.
 - **v1.0.4** - Pack Tool bundled; `run.bat` installs all dependencies on first run.
 - **v1.0.3** - Settings saved to untracked `user_settings.json` (old file migrates); dependency minimums; zip attached to releases.
 - **v1.0.2** - Added MIT license; fixed `.gitignore` filename.

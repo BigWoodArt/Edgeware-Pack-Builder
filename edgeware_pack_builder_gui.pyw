@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.request
 import webbrowser
@@ -40,14 +41,16 @@ try:
 except ImportError:
     HAVE_YAML = False
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_PATH = Path(__file__).resolve()
+SCRIPT_DIR = SCRIPT_PATH.parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.5"
+TOOL_VERSION = "1.0.6"
 SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
 LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
+REPO_ZIP_URL = REPO_URL + "/archive/refs/heads/main.zip"
 REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
 
 
@@ -56,7 +59,7 @@ def _version_tuple(v: str) -> tuple:
 
 
 def check_for_newer_version(current_version: str, timeout: int = 4):
-    """Return the newer version from the repo README's "**vX.Y.Z (current)**"
+    """Return (version, notes) from the repo README's "**vX.Y.Z (current)** - notes"
     line if it is ahead of current_version, else None. Never raises."""
     try:
         with urllib.request.urlopen(REPO_README_RAW_URL, timeout=timeout) as resp:
@@ -64,17 +67,72 @@ def check_for_newer_version(current_version: str, timeout: int = 4):
     except Exception:
         return None
 
-    match = re.search(r"\*\*v([\d.]+)\s*\(current\)\*\*", text)
+    match = re.search(r"\*\*v([\d.]+)\s*\(current\)\*\*[ \t]*-?[ \t]*(.*)", text)
     if not match:
         return None
-    remote_version = match.group(1)
-
     try:
-        if _version_tuple(remote_version) > _version_tuple(current_version):
-            return remote_version
+        if _version_tuple(match.group(1)) > _version_tuple(current_version):
+            return match.group(1), match.group(2).strip()[:200]
     except ValueError:
-        return None
+        pass
     return None
+
+
+_UPDATE_KEEP = {"user_settings.json", "builder_settings.json", ".gitignore", "crash_log.txt", "startup_error.log"}
+
+
+def apply_update() -> str:
+    """Download the latest version from GitHub and copy it over this install,
+    keeping user files. Validated before anything is touched; a failed copy is
+    rolled back (previous files also stay in _update_backup/). Returns the new version."""
+    if (SCRIPT_DIR / ".git").exists():
+        raise RuntimeError("This copy is a git checkout - update it with 'git pull'.")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        archive = tmp / "update.zip"
+        with urllib.request.urlopen(REPO_ZIP_URL, timeout=30) as resp, open(archive, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        with zipfile.ZipFile(archive) as z:
+            for name in z.namelist():
+                if name.startswith("/") or ".." in Path(name).parts:
+                    raise RuntimeError("The update archive has an unsafe path. Nothing was changed.")
+            z.extractall(tmp / "new")
+        roots = [p for p in (tmp / "new").iterdir() if p.is_dir()]
+        if len(roots) != 1 or not (roots[0] / "edgeware_pack_builder_gui.pyw").is_file():
+            raise RuntimeError("The update archive has an unexpected layout. Nothing was changed.")
+        new_root = roots[0]
+        source = (new_root / "edgeware_pack_builder_gui.pyw").read_text(encoding="utf-8")
+        compile(source, "edgeware_pack_builder_gui.pyw", "exec")
+        match = re.search(r'^TOOL_VERSION = "([\d.]+)"', source, re.M)
+        if not match or _version_tuple(match.group(1)) <= _version_tuple(TOOL_VERSION):
+            raise RuntimeError("The downloaded version isn't newer. Nothing was changed.")
+
+        files = [p for p in new_root.rglob("*")
+                 if p.is_file() and "__pycache__" not in p.parts
+                 and p.relative_to(new_root).as_posix() not in _UPDATE_KEEP]
+        backup = SCRIPT_DIR / "_update_backup"
+        shutil.rmtree(backup, ignore_errors=True)
+        done = []
+        try:
+            for p in files:
+                rel = p.relative_to(new_root)
+                dst = SCRIPT_DIR / rel
+                if dst.exists():
+                    (backup / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(dst, backup / rel)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                done.append(rel)
+                shutil.copy2(p, dst)
+        except Exception:
+            for rel in done:
+                saved = backup / rel
+                if saved.exists():
+                    shutil.copy2(saved, SCRIPT_DIR / rel)
+                else:
+                    (SCRIPT_DIR / rel).unlink(missing_ok=True)
+            raise
+        return match.group(1)
+
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -1166,6 +1224,38 @@ def install_packages(packages: list) -> tuple:
     return r.returncode == 0, "\n".join((r.stdout + r.stderr).strip().splitlines()[-12:])
 
 
+def run_with_progress(root: tk.Tk, title: str, text: str, func):
+    """Run func() on a thread behind a small progress window.
+    Returns (True, result) or (False, exception)."""
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.resizable(False, False)
+    win.protocol("WM_DELETE_WINDOW", lambda: None)
+    ttk.Label(win, text=text, padding=20).pack()
+    bar = ttk.Progressbar(win, mode="indeterminate", length=280)
+    bar.pack(padx=20, pady=(0, 20))
+    bar.start(12)
+    out = {}
+
+    def work():
+        try:
+            out["r"] = (True, func())
+        except Exception as e:
+            out["r"] = (False, e)
+
+    def poll():
+        if "r" not in out:
+            root.after(200, poll)
+            return
+        bar.stop()
+        win.destroy()
+
+    threading.Thread(target=work, daemon=True).start()
+    root.after(200, poll)
+    root.wait_window(win)
+    return out["r"]
+
+
 def ensure_dependencies(root: tk.Tk) -> None:
     missing = missing_packages()
     if not missing:
@@ -1177,32 +1267,13 @@ def ensure_dependencies(root: tk.Tk) -> None:
             f"a minute.\n\nChoose No to skip; building packs won't work until they're installed "
             f"(running run.bat also installs them)."):
         return
-    win = tk.Toplevel(root)
-    win.title("Installing...")
-    win.resizable(False, False)
-    win.protocol("WM_DELETE_WINDOW", lambda: None)
-    ttk.Label(win, text=f"Installing {names}...", padding=20).pack()
-    bar = ttk.Progressbar(win, mode="indeterminate", length=280)
-    bar.pack(padx=20, pady=(0, 20))
-    bar.start(12)
-    result = {}
-    threading.Thread(target=lambda: result.update(r=install_packages(missing)), daemon=True).start()
-
-    def poll():
-        if "r" not in result:
-            root.after(200, poll)
-            return
-        bar.stop()
-        win.destroy()
-        ok, log = result["r"]
-        if ok:
-            messagebox.showinfo("Done", "Packages installed.")
-        else:
-            messagebox.showerror("Install failed",
-                                 f"{log}\n\nTry running:\n  py -m pip install {' '.join(missing)}")
-
-    poll()
-    root.wait_window(win)
+    _, (ok, log) = run_with_progress(root, "Installing...", f"Installing {names}...",
+                                     lambda: install_packages(missing))
+    if ok:
+        messagebox.showinfo("Done", "Packages installed.")
+    else:
+        messagebox.showerror("Install failed",
+                             f"{log}\n\nTry running:\n  py -m pip install {' '.join(missing)}")
 
 
 def verify_compiled_media(plan, build_dir: Path) -> list:
@@ -1894,17 +1965,32 @@ class PackBuilderApp:
         def worker():
             newer = check_for_newer_version(TOOL_VERSION)
             if newer:
-                self.root.after(0, lambda: self._offer_update(newer))
+                self.root.after(0, lambda: self._offer_update(*newer))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _offer_update(self, newer_version: str):
-        if messagebox.askyesno(
+    def _offer_update(self, newer_version: str, notes: str = ""):
+        unsaved = "\n\nUnsaved work in this window will be lost." if self.plan.moods else ""
+        if not messagebox.askyesno(
             "Update available",
-            f"A newer version is available on GitHub: v{newer_version} (you have v{TOOL_VERSION}).\n\n"
-            f"Open the GitHub page to download it?"
+            f"v{newer_version} is available (you have v{TOOL_VERSION}).\n\n"
+            + (f"{notes}\n\n" if notes else "")
+            + f"Update now? Your settings are kept and the app restarts.{unsaved}"
         ):
-            webbrowser.open(REPO_URL)
+            return
+        ok, value = run_with_progress(self.root, "Updating...", f"Downloading v{newer_version}...", apply_update)
+        if not ok:
+            reason = str(value) if isinstance(value, RuntimeError) else (
+                f"Something went wrong ({type(value).__name__}). Your existing files were kept.")
+            if messagebox.askyesno("Update failed", f"{reason}\n\nOpen the GitHub page to download it manually?"):
+                webbrowser.open(REPO_URL)
+            return
+        try:
+            subprocess.Popen([sys.executable, str(SCRIPT_PATH)], cwd=str(SCRIPT_DIR))
+        except Exception:
+            messagebox.showinfo("Updated", f"Updated to v{value}. Please reopen the app.")
+            return
+        self.root.destroy()
 
     def _set_edit_mode(self, on: bool):
         """Swap the whole app's accent color between the normal crimson and
