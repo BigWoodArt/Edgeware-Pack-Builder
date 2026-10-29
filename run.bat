@@ -1,16 +1,10 @@
 @echo off
 cd /d "%~dp0"
 
-echo Checking for required Python packages (pyyaml, pillow)...
-py -m pip show pyyaml >nul 2>&1
+py -c "import yaml, PIL, filetype, voluptuous, pyffmpeg" >nul 2>&1
 if errorlevel 1 (
-    echo Installing pyyaml...
-    py -m pip install pyyaml
-)
-py -m pip show pillow >nul 2>&1
-if errorlevel 1 (
-    echo Installing pillow...
-    py -m pip install pillow
+    echo Installing required Python packages - first run only, may take a minute...
+    py -m pip install -r requirements.txt
 )
 
 echo Starting Edgeware++ Advanced Pack Builder...

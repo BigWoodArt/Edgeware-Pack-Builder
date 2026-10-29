@@ -4,11 +4,11 @@ GUI for building Edgeware++ packs from a folder of mood subfolders - no hand-wri
 
 ## Setup
 
-Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - auto-installs `pyyaml` + `pillow`, launches app. `banner.png` must stay next to the script. Pack Tool folder auto-detects nearby (up to 3 folders up/down); otherwise pick it manually - any folder within 3 levels of it works - and it's remembered.
+Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - installs what's needed on first run, then launches the app. The Pack Tool is bundled in `pack_tool/` and found automatically; to use another copy, pick it (or any folder within 3 levels of it) and it's remembered. `banner.png` must stay next to the script.
 
 ## Pages
 
-**1 - Source & Pack Tool:** folder of mood subfolders (first = starting mood) + optional Pack Tool folder (enables one-click `.zip` build). **Load Existing Pack** (folder/zip) reopens one for editing.
+**1 - Source & Pack Tool:** folder of mood subfolders (first = starting mood) + Pack Tool folder (bundled; enables one-click `.zip` build). **Load Existing Pack** (folder/zip) reopens one for editing.
 
 **2 - Whole-Experience:** 4 **Presets** (Slight Annoyance → Life-Ending Slavery) spread full intensity curves across all moods, editable after; also set hypno overlay chance/strength (max 20%) and popup opacity (100%). Pack info. **Mood Cycling** (seconds or popup-count) + optional per-mood ramp. **Pack-Wide Settings** (Corruption/Hibernate/Mitosis mode, Level Transition, Buttonless, button text). **Escalating Spirals/Denial** with Apply. Hypno/wallpaper/splash/Discord-status extras.
 
@@ -36,7 +36,7 @@ Folder-loaded packs get **Save Changes to Pack** instead - saves in place, times
 
 ## Limitations
 
-Zips extract to `loaded_packs/` (not temp) for path stability. Missing wallpaper → build stops with a clear error. Video thumbnails are placeholder icons. No dangerous settings (fill/panic-disable) by design. webp black-square is a known Edgeware++ bug. Reconstruction is unverified against a real compiled pack.
+Video compression uses `pyffmpeg`, which may download ffmpeg on first use (needs internet). If the build fails with it on, turn it off - everything else still works. Zips extract to `loaded_packs/` (not temp) for path stability. Missing wallpaper → build stops with a clear error. Video thumbnails are placeholder icons. No dangerous settings (fill/panic-disable) by design. webp black-square is a known Edgeware++ bug. Reconstruction is unverified against a real compiled pack.
 
 ## To test
 
@@ -46,7 +46,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.3 (current)** - Settings saved to untracked `user_settings.json` (old file migrates); dependency minimums; zip attached to releases.
+- **v1.0.4 (current)** - Pack Tool bundled; `run.bat` installs all dependencies on first run.
+- **v1.0.3** - Settings saved to untracked `user_settings.json` (old file migrates); dependency minimums; zip attached to releases.
 - **v1.0.2** - Added MIT license; fixed `.gitignore` filename.
 - **v1.0.1** - Pack Tool search now looks up to 3 folders up/down from your selection.
 - **v1.0.0** - Cleanup release: removed dead code and comment bloat. Presets now set hypno overlay chance/strength (max 20%) and popup opacity (100%).
@@ -75,4 +76,4 @@ One short line per entry.
 
 ## License
 
-MIT - see `LICENSE`.
+MIT - see `LICENSE`. The bundled `pack_tool/` is unmodified Edgeware++ code under GPLv3 - see `pack_tool/COPYING`.

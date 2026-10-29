@@ -44,7 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.3"
+TOOL_VERSION = "1.0.4"
 SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
 LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
@@ -202,8 +202,12 @@ def locate_pack_tool(start, depth: int = 3, max_dirs: int = 5000) -> str:
 
 
 def find_pack_tool_dir() -> str:
-    """Auto-detect the Pack Tool near this script."""
+    """Auto-detect the Pack Tool near this script (the bundled one first)."""
     return locate_pack_tool(SCRIPT_DIR)
+
+
+def pack_tool_note(path: str) -> str:
+    return "(bundled)" if Path(path) == SCRIPT_DIR / "pack_tool" else "(auto-detected)"
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +295,7 @@ TOOLTIPS = {
     "loading_splash": "Pick the picture shown on the loading screen when the pack first starts up.",
     "loading_splash_clear": "Remove the loading screen picture you picked.",
     "compress_images": "Shrinks picture file sizes so the finished pack takes up less space.",
-    "compress_videos": "Shrinks video file sizes so the finished pack takes up less space.",
+    "compress_videos": "Shrinks video file sizes so the finished pack takes up less space. The first time, it may download ffmpeg (needs internet). If the build fails, turn this off.",
     "rename_media": "Renames files so older versions of the program can understand which mood they belong to.",
     "captions_box": "Type little messages here. Press Enter to start a new one - each line becomes its own message.",
     "notif_box": "Type notification messages here, one per line, like a text message popping up.",
@@ -1805,7 +1809,7 @@ class PackBuilderApp:
         if auto:
             self.plan.pack_tool_dir = auto
             self.pack_tool_var.set(auto)
-            self.pack_tool_note_var.set("(auto-detected)")
+            self.pack_tool_note_var.set(pack_tool_note(auto))
         elif self.settings.get("pack_tool_dir") and (Path(self.settings["pack_tool_dir"]) / "src" / "main.py").is_file():
             self.plan.pack_tool_dir = self.settings["pack_tool_dir"]
             self.pack_tool_var.set(self.plan.pack_tool_dir)
@@ -2401,7 +2405,7 @@ class PackBuilderApp:
             if auto:
                 self.plan.pack_tool_dir = auto
                 self.pack_tool_var.set(auto)
-                self.pack_tool_note_var.set("(auto-detected)")
+                self.pack_tool_note_var.set(pack_tool_note(auto))
             elif self.settings.get("pack_tool_dir") and (Path(self.settings["pack_tool_dir"]) / "src" / "main.py").is_file():
                 self.plan.pack_tool_dir = self.settings["pack_tool_dir"]
                 self.pack_tool_var.set(self.plan.pack_tool_dir)

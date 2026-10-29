@@ -1,0 +1,4 @@
+*/*
+pack_tool.sh
+!src/*
+__pycache__/
