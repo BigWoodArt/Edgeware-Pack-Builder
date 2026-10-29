@@ -4,11 +4,11 @@ GUI for building Edgeware++ packs from a folder of mood subfolders - no hand-wri
 
 ## Setup
 
-Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - installs what's needed on first run, then launches the app. Launching `edgeware_pack_builder_gui.pyw` directly works too; it offers to install anything missing. The Pack Tool is bundled in `pack_tool/` and found automatically; to use another copy, pick it (or any folder within 3 levels of it) and it's remembered. `banner.png` must stay next to the script.
+Python 3.10+ (Windows, "Add to PATH" checked). Double-click `run.bat` - installs what's needed on first run, then launches the app. Launching `edgeware_pack_builder_gui.pyw` directly works too; it offers to install anything missing. The Pack Tool is bundled in `pack_tool/` and used automatically - keep that folder next to the program. `banner.png` must stay next to the script.
 
 ## Pages
 
-**1 - Source & Pack Tool:** folder of mood subfolders (first = starting mood) + Pack Tool folder (bundled; enables one-click `.zip` build). **Load Existing Pack** (folder/zip) reopens one for editing.
+**1 - Source & Pack Tool:** folder of mood subfolders (first = starting mood) (the bundled Pack Tool is used automatically for one-click `.zip` builds). **Load Existing Pack** (folder/zip) reopens one for editing.
 
 **2 - Whole-Experience:** 4 **Presets** (Slight Annoyance → Life-Ending Slavery) spread full intensity curves across all moods, editable after; also set hypno overlay chance/strength (max 20%) and popup opacity (100%). Pack info. **Mood Cycling** (seconds or popup-count) + optional per-mood ramp. **Pack-Wide Settings** (Corruption/Hibernate/Mitosis mode, Level Transition, Buttonless, button text). **Escalating Spirals/Denial** with Apply. Hypno/wallpaper/splash/Discord-status extras.
 
@@ -36,7 +36,7 @@ Folder-loaded packs get **Save Changes to Pack** instead - saves in place, times
 
 ## Updating
 
-When a newer version exists, the app offers **Update now**: it downloads the latest files, keeps your settings and loaded packs, and restarts. Git checkouts update with `git pull` instead. If an update fails, nothing is changed.
+When a newer version exists, the app offers **Update now**: it downloads the latest files, keeps your loaded packs, and restarts. Git checkouts update with `git pull` instead. If an update fails, nothing is changed.
 
 ## Limitations
 
@@ -50,7 +50,8 @@ Presets in-game feel, Hibernate/Mitosis behavior, reconstruction quality, Media 
 
 One short line per entry.
 
-- **v1.0.7 (current)** - Old projects with a stale Pack Tool path now use the bundled one; harmless compiler warnings hidden.
+- **v1.0.8 (current)** - Removed the Pack Tool Browse button; the bundled tool is always used.
+- **v1.0.7** - Old projects with a stale Pack Tool path now use the bundled one; harmless compiler warnings hidden.
 - **v1.0.6** - One-click update from inside the app; settings kept, old files backed up to `_update_backup/`.
 - **v1.0.5** - App offers to install missing packages itself on startup.
 - **v1.0.4** - Pack Tool bundled; `run.bat` installs all dependencies on first run.

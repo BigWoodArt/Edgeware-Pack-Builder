@@ -8,6 +8,5 @@ startup_error.log
 # Python
 __pycache__/
 
-# Per-user settings
-user_settings.json
+# Updater backup
 _update_backup/

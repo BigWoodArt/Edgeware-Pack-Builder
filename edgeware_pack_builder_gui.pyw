@@ -46,9 +46,7 @@ SCRIPT_DIR = SCRIPT_PATH.parent
 BANNER_PATH = SCRIPT_DIR / "banner.png"
 ICON_PATH = SCRIPT_DIR / "icon.png"
 ICON_ICO_PATH = SCRIPT_DIR / "icon.ico"
-TOOL_VERSION = "1.0.7"
-SETTINGS_PATH = SCRIPT_DIR / "user_settings.json"  # untracked, per-user
-LEGACY_SETTINGS_PATH = SCRIPT_DIR / "builder_settings.json"  # read once to migrate
+TOOL_VERSION = "1.0.8"
 REPO_URL = "https://github.com/BigWoodArt/Edgeware-Pack-Builder"
 REPO_ZIP_URL = REPO_URL + "/archive/refs/heads/main.zip"
 REPO_README_RAW_URL = "https://raw.githubusercontent.com/BigWoodArt/Edgeware-Pack-Builder/main/README.md"
@@ -78,7 +76,7 @@ def check_for_newer_version(current_version: str, timeout: int = 4):
     return None
 
 
-_UPDATE_KEEP = {"user_settings.json", "builder_settings.json", ".gitignore", "crash_log.txt", "startup_error.log"}
+_UPDATE_KEEP = {"builder_settings.json", ".gitignore", "crash_log.txt", "startup_error.log"}
 
 
 def apply_update() -> str:
@@ -201,33 +199,12 @@ def style_text_widget(widget: tk.Text):
                       highlightbackground=ACCENT, highlightcolor=ACCENT_ACTIVE)
 
 
-# ---------------------------------------------------------------------------
-# Persisted settings (remembers the Pack Tool folder across runs)
-# ---------------------------------------------------------------------------
-
-def load_settings() -> dict:
-    for path in (SETTINGS_PATH, LEGACY_SETTINGS_PATH):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and (data or path is SETTINGS_PATH):
-                return data
-        except Exception:
-            continue
-    return {}
-
-
-def save_settings(d: dict) -> None:
-    try:
-        SETTINGS_PATH.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    except Exception:
-        pass  # best-effort - not worth bothering the user about
-
-
 _SKIP_DIRS = {"__pycache__", "node_modules", "loaded_packs"}
+_PACK_TOOL_FILES = ("main.py", "write_files.py", "schemas.py")  # tells the Pack Tool apart from any other src/main.py
 
 
 def locate_pack_tool(start, depth: int = 3, max_dirs: int = 5000) -> str:
-    """Nearest folder containing src/main.py within `depth` steps of `start`,
+    """Nearest Pack Tool folder (src/main.py + friends) within `depth` steps of `start`,
     where a step is one folder up or down (so a sibling is 2 steps away).
     Returns "" if none, or if more than max_dirs folders would be scanned."""
     start = Path(start)
@@ -254,7 +231,7 @@ def locate_pack_tool(start, depth: int = 3, max_dirs: int = 5000) -> str:
                     nxt.extend(Path(x) for x in kids)
                 lv.append(nxt)
             for p in lv[m]:
-                if (p / "src" / "main.py").is_file():
+                if all((p / "src" / n).is_file() for n in _PACK_TOOL_FILES):
                     return str(p)
     return ""
 
@@ -262,10 +239,6 @@ def locate_pack_tool(start, depth: int = 3, max_dirs: int = 5000) -> str:
 def find_pack_tool_dir() -> str:
     """Auto-detect the Pack Tool near this script (the bundled one first)."""
     return locate_pack_tool(SCRIPT_DIR)
-
-
-def pack_tool_note(path: str) -> str:
-    return "(bundled)" if Path(path) == SCRIPT_DIR / "pack_tool" else "(auto-detected)"
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +300,6 @@ def tip(widget, text):
 
 TOOLTIPS = {
     "source_folder": "Pick the folder that has one folder inside it for each mood.",
-    "pack_tool_folder": "Pick the folder on your computer where the Pack Tool lives (it has a 'src' folder inside it). This lets the Build button finish everything for you.",
     "load_pack": "Open a pack you've already built to keep editing it - either a folder or a .zip.",
     "pack_name": "The name people will see for this pack.",
     "pack_id": "A short one-word nickname for this pack, no spaces. Used behind the scenes.",
@@ -1889,7 +1861,6 @@ class PackBuilderApp:
         self._build_menu_bar()
 
         self.plan = PackPlan()
-        self.settings = load_settings()
         self.reconstructed_warnings = []
 
         # Thumbnail caches for both sidebars.
@@ -1897,8 +1868,7 @@ class PackBuilderApp:
         self._media_tab_photo_refs = {}
 
         self.source_var = StringVar(value="No folder selected")
-        self.pack_tool_var = StringVar(value="Not set (you'll compile manually)")
-        self.pack_tool_note_var = StringVar(value="")
+        self.pack_tool_var = StringVar(value="")
         self.mood_count_var = StringVar(value="")
 
         self.name_var = StringVar(value=self.plan.pack_name)
@@ -1945,16 +1915,7 @@ class PackBuilderApp:
         self._build_result = {}
         self._build_thread = None
 
-        # Auto-detect / remember the Pack Tool folder
-        auto = find_pack_tool_dir()
-        if auto:
-            self.plan.pack_tool_dir = auto
-            self.pack_tool_var.set(auto)
-            self.pack_tool_note_var.set(pack_tool_note(auto))
-        elif self.settings.get("pack_tool_dir") and (Path(self.settings["pack_tool_dir"]) / "src" / "main.py").is_file():
-            self.plan.pack_tool_dir = self.settings["pack_tool_dir"]
-            self.pack_tool_var.set(self.plan.pack_tool_dir)
-            self.pack_tool_note_var.set("(remembered from last time)")
+        self._refresh_pack_tool()
 
         self.edit_mode = False
         self._build_step1()
@@ -1977,7 +1938,7 @@ class PackBuilderApp:
             "Update available",
             f"v{newer_version} is available (you have v{TOOL_VERSION}).\n\n"
             + (f"{notes}\n\n" if notes else "")
-            + f"Update now? Your settings are kept and the app restarts.{unsaved}"
+            + f"Update now? Your loaded packs are kept and the app restarts.{unsaved}"
         ):
             return
         ok, value = run_with_progress(self.root, "Updating...", f"Downloading v{newer_version}...", apply_update)
@@ -2244,24 +2205,8 @@ class PackBuilderApp:
         if self.mood_names:
             self._render_mood_list()
 
-        pt_frame = ttk.LabelFrame(frm, text="Pack Tool location (optional, enables one-click build)", padding=10)
-        pt_frame.pack(fill="x", pady=(15, 5))
-        ttk.Label(pt_frame, text="Pack Tool folder (any folder within 3 levels of it works):", style="Muted.TLabel").pack(anchor="w")
-        pt_row = ttk.Frame(pt_frame)
-        pt_row.pack(fill="x", pady=(4, 0))
-        pt_entry = ttk.Entry(pt_row, textvariable=self.pack_tool_var, state="readonly")
-        pt_entry.pack(side="left", fill="x", expand=True)
-        tip(pt_entry, TOOLTIPS["pack_tool_folder"])
-        pt_browse = ttk.Button(pt_row, text="Browse...", command=self._pick_pack_tool)
-        pt_browse.pack(side="left", padx=(8, 0))
-        tip(pt_browse, TOOLTIPS["pack_tool_folder"])
-        ttk.Label(pt_frame, textvariable=self.pack_tool_note_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
-        ttk.Label(
-            pt_frame,
-            text="If set, Build Pack compiles straight to a finished .zip. If left unset, "
-                 "you'll get a pack.yml + media folder to compile yourself.",
-            style="Muted.TLabel", wraplength=650, justify="left"
-        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(frm, textvariable=self.pack_tool_var, style="Muted.TLabel",
+                  wraplength=650, justify="left").pack(anchor="w", pady=(15, 5))
 
     def _render_mood_list(self):
         for w in self.mood_list_frame.winfo_children():
@@ -2397,27 +2342,6 @@ class PackBuilderApp:
         self._render_mood_list()
         self.next_btn.config(state="normal")
 
-    def _pick_pack_tool(self):
-        chosen = filedialog.askdirectory(title="Select the Pack Tool folder (or any folder near it)")
-        if not chosen:
-            return
-        found = locate_pack_tool(chosen)
-        note = ""
-        if found and Path(found) != Path(chosen):
-            note = "(found near your selection)"
-            chosen = found
-        elif not found:
-            messagebox.showwarning(
-                "Pack Tool not found",
-                f"No src/main.py within 3 folders up or down from '{chosen}'. Pick the Pack Tool "
-                f"folder (the one PackToolScript.bat lives in), or a folder near it."
-            )
-        self.plan.pack_tool_dir = chosen
-        self.pack_tool_var.set(chosen)
-        self.pack_tool_note_var.set(note)
-        self.settings["pack_tool_dir"] = chosen
-        save_settings(self.settings)
-
     # -- Load ---------------------------------------------------------------
 
     def _load_from_folder(self):
@@ -2513,6 +2437,15 @@ class PackBuilderApp:
         )
         self._build_step1()
 
+    def _refresh_pack_tool(self):
+        """Always use the Pack Tool found next to this program; a path saved in an
+        old project or plan is never trusted."""
+        self.plan.pack_tool_dir = find_pack_tool_dir()
+        self.pack_tool_var.set(
+            "Pack Tool: ready - Build Pack makes a finished .zip." if self.plan.pack_tool_dir else
+            "Pack Tool not found. Keep the pack_tool folder next to this program (re-download "
+            "to restore it). Without it, Build Pack only writes pack.yml + media for you to compile.")
+
     def _apply_loaded_plan(self):
         """Push a freshly loaded/reconstructed PackPlan into every widget var."""
         self.mood_names = list(self.plan.moods)
@@ -2553,25 +2486,7 @@ class PackBuilderApp:
         self.loading_splash_path = self.plan.loading_splash_path
         self.loading_splash_label_var.set(Path(self.loading_splash_path).name if self.loading_splash_path else "No image selected")
 
-        if self.plan.pack_tool_dir and (Path(self.plan.pack_tool_dir) / "src" / "main.py").is_file():
-            self.pack_tool_var.set(self.plan.pack_tool_dir)
-            self.pack_tool_note_var.set(pack_tool_note(self.plan.pack_tool_dir) if Path(self.plan.pack_tool_dir) == SCRIPT_DIR / "pack_tool" else "")
-        else:
-            # plan.json carries no pack_tool_dir, and a saved .epbproj's can be stale
-            # (moved or other machine): re-run auto-detect.
-            self.plan.pack_tool_dir = ""
-            auto = find_pack_tool_dir()
-            if auto:
-                self.plan.pack_tool_dir = auto
-                self.pack_tool_var.set(auto)
-                self.pack_tool_note_var.set(pack_tool_note(auto))
-            elif self.settings.get("pack_tool_dir") and (Path(self.settings["pack_tool_dir"]) / "src" / "main.py").is_file():
-                self.plan.pack_tool_dir = self.settings["pack_tool_dir"]
-                self.pack_tool_var.set(self.plan.pack_tool_dir)
-                self.pack_tool_note_var.set("(remembered from last time)")
-            else:
-                self.pack_tool_var.set("Not set (you'll compile manually)")
-                self.pack_tool_note_var.set("")
+        self._refresh_pack_tool()
 
     # -- Step 2: whole-experience settings ---------------------------------
 
@@ -3818,12 +3733,7 @@ class PackBuilderApp:
         either one fail or produce a broken pack. Shows its own warning
         dialogs; returns False if the caller should stop."""
         self._sync_step2_into_plan()
-        if self.plan.pack_tool_dir and not (Path(self.plan.pack_tool_dir) / "src" / "main.py").is_file():
-            auto = find_pack_tool_dir()
-            if auto:
-                self.plan.pack_tool_dir = auto
-                self.pack_tool_var.set(auto)
-                self.pack_tool_note_var.set(pack_tool_note(auto))
+        self._refresh_pack_tool()
         parse_errors = self._sync_moods_into_plan(strict=True)
 
         if parse_errors:
@@ -3968,7 +3878,7 @@ class PackBuilderApp:
             messagebox.showinfo(
                 "Pack source ready",
                 f"Wrote pack.yml + arranged media/ to:\n{out_dir}\n\n"
-                f"No Pack Tool folder was set, so you'll need to compile it yourself "
+                f"The pack_tool folder wasn't found next to this program, so you'll need to compile it yourself "
                 f"(PackToolScript.bat -> option 3, pointed at that folder)."
                 f"{perm_note}"
             )
@@ -4031,9 +3941,10 @@ class PackBuilderApp:
 
         if not self.plan.pack_tool_dir:
             messagebox.showwarning(
-                "No Pack Tool folder set",
-                "Save Changes to Pack needs to actually recompile the pack, which needs a Pack "
-                "Tool folder - set one on the first page before saving."
+                "Pack Tool not found",
+                "Save Changes to Pack needs to recompile the pack, which needs the pack_tool "
+                "folder that comes with this program. Put it back next to the program (or "
+                "re-download) and try again."
             )
             return
 
